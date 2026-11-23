@@ -1,0 +1,39 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config/local.*
+/.aws/
+/.agents/
+/.codex/
+/.ijfw/
+
+# Runtime data
+data/*
+!data/.gitkeep
+playlists/*
+!playlists/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+backups/
+
+# Build and Python artifacts
+/backend/bin/
+/backend/smart-radio
+/backend/dist/
+/dist/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
+*:Zone.Identifier

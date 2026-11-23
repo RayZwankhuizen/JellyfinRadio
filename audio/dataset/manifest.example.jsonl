@@ -1,0 +1,10 @@
+# Keep each source_id in exactly one split. Prefer source-disjoint speakers, songs and stations.
+# Replace every path with a locally held, license-recorded clip before running evaluate-audio.py.
+{"path":"clips/instrumental.wav","label":"instrumental_music","source_id":"cc0-piano-01","license":"CC0-1.0","attribution":"Wikimedia Commons: Eb major piano.ogg; author ROUX₪","split":"test","speech_kind":""}
+{"path":"clips/singing.wav","label":"singing","source_id":"cc0-vibrato-01","license":"CC0-1.0","attribution":"Wikimedia Commons: Female-vibrato-1.wav; author Beetricks","split":"test","speech_kind":""}
+{"path":"clips/speech.wav","label":"speech","source_id":"speech-source-01","license":"RECORD-LICENSE","attribution":"RECORD-ATTRIBUTION","split":"test","speech_kind":"presenter"}
+{"path":"clips/speech-over-instrumental.wav","label":"speech_over_music","source_id":"speech-piano-01","license":"RECORD-LICENSE","attribution":"RECORD-ATTRIBUTION; CC0 piano","split":"test","speech_kind":"news"}
+{"path":"clips/speech-over-singing.wav","label":"speech_over_singing","source_id":"speech-singing-01","license":"RECORD-LICENSE","attribution":"RECORD-ATTRIBUTION; CC0 singing","split":"test","speech_kind":"advertisement"}
+{"path":"clips/news.wav","label":"news","source_id":"news-source-01","license":"RECORD-LICENSE","attribution":"RECORD-ATTRIBUTION","split":"test","speech_kind":"news"}
+{"path":"clips/presenter.wav","label":"presenter","source_id":"presenter-source-01","license":"RECORD-LICENSE","attribution":"RECORD-ATTRIBUTION","split":"test","speech_kind":"presenter"}
+{"path":"clips/advertisement.wav","label":"advertisement","source_id":"advert-source-01","license":"RECORD-LICENSE","attribution":"RECORD-ATTRIBUTION","split":"test","speech_kind":"advertisement"}

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101318">
+  <title>Smart Radio · Beheer</title>
+  <link rel="icon" type="image/png" href="/brand/smart-radio-icon.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#dashboard"><img class="brand-mark" src="/brand/smart-radio-icon.png" width="39" height="39" alt=""><span>Smart Radio<small>Jellyfin beheer</small></span></a>
+    <nav aria-label="Hoofdnavigatie">
+      <p class="nav-label">WERKPLEK</p>
+      <a href="#dashboard" data-page="dashboard"><span>▦</span> Dashboard</a>
+      <a href="#stations" data-page="stations"><span>◉</span> Alle zenders</a>
+      <p class="nav-label">LANDEN</p>
+      <div id="country-nav"></div>
+      <a href="#favorites" data-page="favorites"><span>☆</span> Favorieten</a>
+      <a href="#genres" data-page="genres"><span>⌘</span> Genres</a>
+      <p class="nav-label">BEHEER</p>
+      <a href="#custom" data-page="custom"><span>＋</span> Eigen zenders</a>
+      <a href="#country-management" data-page="country-management"><span>⌘</span> Landen beheren</a>
+      <a href="#audio" data-page="audio"><span>〰</span> Audioanalyse</a>
+      <a href="#diagnostics" data-page="diagnostics"><span>⌁</span> Streamdiagnose</a>
+      <a href="#imports" data-page="imports"><span>↻</span> Importgeschiedenis</a>
+    </nav>
+    <div class="sidebar-bottom"><span class="status-dot"></span><span>Lokale beheeromgeving</span></div>
+  </aside>
+  <main>
+    <header class="topbar"><div class="crumb"><span>Jellyfin Smart Radio</span><b>/</b><strong id="page-title">Dashboard</strong></div><div class="top-actions"><a class="button quiet" href="/stations.m3u" target="_blank" rel="noreferrer">M3U openen</a><button class="button primary" id="sync-button">Nu synchroniseren</button></div></header>
+    <section id="content" class="content" aria-live="polite"><div class="loading">Dashboard laden…</div></section>
+  </main>
+  <section id="radio-player" class="radio-player" aria-label="Radio-afspeelbediening" hidden>
+    <div class="radio-source-panel" role="group" aria-label="Ruwe stream">
+      <div class="radio-source"><strong>Bronstream</strong><code id="radio-stream-url">Selecteer een zender</code><button class="button quiet" id="radio-copy-url" type="button" disabled>Kopieer URL</button><span id="radio-copy-status" role="status"></span></div>
+      <details class="radio-source-details">
+        <summary>Ontvangen headers en metadata</summary>
+        <h3>HTTP-respons</h3>
+        <pre id="radio-raw-headers">Wachten op de bronstream…</pre>
+        <h3>Laatste ICY-metadatablok</h3>
+        <pre id="radio-raw-title">Wachten op streammetadata…</pre>
+      </details>
+      <div class="radio-source"><button class="button quiet" id="radio-record-metadata" type="button" disabled>Metadata opnemen</button><span id="radio-record-status" role="status"></span></div>
+    </div>
+    <div class="radio-player-head">
+      <div class="radio-player-copy"><small>RADIO</small><strong id="radio-player-name">Geen zender geselecteerd</strong><span id="radio-now-playing" role="status">Wachten op streammetadata…</span><span id="radio-player-status" role="status"></span></div>
+      <audio id="radio-audio" controls preload="none" aria-label="Radio afspelen of pauzeren"></audio>
+      <div class="radio-dsp"><button class="button quiet" id="radio-dsp-toggle" type="button" disabled>DSP laden…</button><span id="radio-dsp-status" role="status">Selecteer een zender</span></div>
+      <button class="button quiet" id="radio-stop" type="button">Stop</button>
+    </div>
+    <div class="radio-live-panel" aria-label="Live audioanalyse">
+      <div class="radio-analysis-chart"><div class="radio-section-label"><span>FREQUENTIES · LAAG → HOOG</span><span id="radio-player-format">Formaat onbekend</span></div><canvas id="radio-spectrogram" width="360" height="64" role="img" aria-label="Live spectrum: verticale frequentiemeters bewegen op en neer"></canvas><span id="radio-signal-status" aria-live="polite">Wachten op audiodata</span></div>
+      <div class="radio-mixer" role="group" aria-label="Live frequentie en stemniveaus">
+        <div class="mixer-strip"><span>Bas</span><div class="mixer-meter" role="meter" aria-label="Basniveau" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="meter-bass"></i></div><strong id="value-bass">0%</strong></div>
+        <div class="mixer-strip"><span>Midden</span><div class="mixer-meter" role="meter" aria-label="Middentonen" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="meter-mid"></i></div><strong id="value-mid">0%</strong></div>
+        <div class="mixer-strip"><span>Hoog</span><div class="mixer-meter" role="meter" aria-label="Hoge tonen" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="meter-high"></i></div><strong id="value-high">0%</strong></div>
+        <div class="mixer-strip voice"><span>Spraak</span><div class="mixer-meter" role="meter" aria-label="Modelscore spraak" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="meter-speech"></i></div><strong id="value-speech">—</strong></div>
+        <div class="mixer-strip voice"><span>Zang</span><div class="mixer-meter" role="meter" aria-label="Modelscore zang" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="meter-singing"></i></div><strong id="value-singing">—</strong></div>
+        <div class="mixer-strip voice"><span>Jingle</span><div class="mixer-meter" role="meter" aria-label="Modelscore jingle" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="meter-jingle"></i></div><strong id="value-jingle">—</strong></div>
+        <div class="mixer-strip voice"><span>Muziek</span><div class="mixer-meter" role="meter" aria-label="Modelscore muziek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="meter-music"></i></div><strong id="value-music">—</strong></div>
+      </div>
+      <div class="radio-feedback"><div id="radio-learning-match" class="radio-learning-match" hidden aria-live="polite"></div><div class="radio-feedback-copy"><strong id="live-detection">Wachten op audioanalyse…</strong><span id="radio-feedback-status" role="status">Label een fragment; het wordt lokaal bewaard voor herkenningstraining.</span></div><div class="radio-labels" role="group" aria-label="Label dit audiofragment"><button type="button" data-audio-label="music">Muziek</button><button type="button" data-audio-label="speech">Spraak</button><button type="button" data-audio-label="singing">Zang</button><button type="button" data-audio-label="jingle">Jingle</button><button type="button" data-audio-label="news">Nieuws</button><button type="button" data-audio-label="advertisement">Reclame</button><button type="button" data-audio-label="other">Anders</button></div></div>
+    </div>
+  </section>
+  <dialog id="station-dialog">
+    <form id="station-form" method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">ZENDERBEHEER</p><h2>Eigen zender toevoegen</h2></div><button class="icon-button" value="cancel" aria-label="Sluiten">×</button></div>
+      <label>Zendernaam<input name="name" required maxlength="180" placeholder="Radio Noord" /></label>
+      <label>Stream URL<input name="stream_url" type="url" required placeholder="https://…" /></label>
+      <div class="form-row"><label>Landcode<input name="country_code" maxlength="2" placeholder="NL" /></label><label>Genre<input name="tags" placeholder="jazz, nieuws" /></label></div>
+      <label>Logo URL<input name="logo_url" type="url" placeholder="https://…" /></label>
+      <p id="form-error" class="error" role="alert"></p>
+      <div class="dialog-actions"><button class="button quiet" value="cancel">Annuleren</button><button class="button primary" type="submit">Zender opslaan</button></div>
+    </form>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

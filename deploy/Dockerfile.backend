@@ -1,0 +1,20 @@
+FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS build
+
+WORKDIR /src/backend
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/ .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/smart-radio ./cmd/smart-radio \
+    && mkdir -p /out/data \
+    && chown 65532:65532 /out/data
+
+FROM gcr.io/distroless/base-debian12:nonroot
+COPY --from=build --chown=65532:65532 /out/data /data
+COPY --from=build /out/smart-radio /usr/local/bin/smart-radio
+COPY --chown=65532:65532 web /web
+ENV WEB_DIR=/web
+USER 65532:65532
+EXPOSE 8787
+ENTRYPOINT ["/usr/local/bin/smart-radio"]
+CMD ["serve"]

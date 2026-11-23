@@ -1,0 +1,84 @@
+services:
+  smart-radio:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    image: jellyfin-smart-radio:${RELEASE_TAG:-local}
+    command: ["serve"]
+    environment:
+      DB_PATH: /data/smart-radio.db
+      LISTEN_ADDR: ${LISTEN_ADDR:-:8787}
+      STREAM_BASE_URL: ${STREAM_BASE_URL:-http://smart-radio:8787}
+      RADIO_COUNTRIES: ${RADIO_COUNTRIES:-NL,BE,ES}
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-24h}
+      HEALTH_INTERVAL: ${HEALTH_INTERVAL:-24h}
+      HEALTH_CHECK_LIMIT: ${HEALTH_CHECK_LIMIT:-500}
+      AUDIO_SERVICE_URL: http://smart-radio-audio:8790
+      AUDIO_DSP_ENABLED: ${AUDIO_DSP_ENABLED:-false}
+      SMART_RADIO_API_TOKEN: ${SMART_RADIO_API_TOKEN:-}
+      WEB_DIR: /web
+    volumes:
+      - smart-radio-data:/data
+    ports:
+      - "${SMART_RADIO_BIND:-127.0.0.1}:${SMART_RADIO_PORT:-8787}:8787"
+    networks:
+      - arr-stack_default
+      - smart-radio-internal
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    depends_on:
+      smart-radio-audio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/smart-radio", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  smart-radio-audio:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.audio
+    image: jellyfin-smart-radio-audio:${RELEASE_TAG:-local}
+    environment:
+      LISTEN_ADDR: 0.0.0.0
+      PORT: 8790
+    networks:
+      - smart-radio-internal
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 768M
+
+volumes:
+  smart-radio-data:
+
+networks:
+  arr-stack_default:
+    external: true
+  smart-radio-internal:
+    internal: true

@@ -1,1 +1,9 @@
-# JellyfinRadio
+# Jellyfin Smart Radio
+
+Self-hosted internet radio management and playback for Jellyfin. Development runs in WSL; production deployment is a separate, manually approved step to UbuntuMedia.
+
+Project status: the WSL backend, M3U generator, stream proxy, analysis service, management UI and deployment scripts are implemented. Browser playback shows current ICY track metadata, the source stream URL with a copy button, live YAMNet scores and compact mixer-style meters. User-labeled 975 ms clips and model scores are stored locally only when a label is selected. Per-station learning offers a four-hour repeated-audio matcher and a one-hour classifier-transition recorder. Transition clips contain five seconds before and after a category change, with two consecutive windows required to confirm a new category. The repeated-audio mode uses five-second decoded blocks above 80% spectral similarity and skips matches within the same ICY track; streams without track metadata can still produce song-fragment candidates. Results remain manual-review candidates and do not automatically filter playback. An opt-in manual constant-gain path pipes audio from the Go proxy through FFmpeg and returns MP3; passthrough remains the default. Automatic news/ad/speech attenuation remains disabled because classifier quality is not validated. Production has not been deployed or tested against UbuntuMedia.
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the WSL workflow and [docs/](docs/) for component documentation.
+
+Start with [DEVELOPMENT.md](DEVELOPMENT.md). To launch the local app in WSL, configure `.env` as described there and run `make start`. Deployment, configuration, Jellyfin setup and troubleshooting are documented in [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [JELLYFIN.md](JELLYFIN.md) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Audio model limits and measurements are in [AUDIO-ENGINE.md](docs/AUDIO-ENGINE.md).
