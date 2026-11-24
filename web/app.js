@@ -1,17 +1,149 @@
 const content = document.querySelector('#content');
 const title = document.querySelector('#page-title');
-const titles = {dashboard:'Dashboard',stations:'Alle zenders',favorites:'Favorieten',genres:'Genres',countries:'Andere landen',custom:'Eigen zenders',audio:'Audioanalyse',diagnostics:'Streamdiagnose',imports:'Importgeschiedenis', 'country-management':'Landen beheren'};
+const titles = {'learning-recordings':'Leerfragmenten',player:'Speler',dashboard:'Dashboard',stations:'Alle zenders',favorites:'Favorieten',genres:'Genres',countries:'Andere landen',custom:'Eigen zenders',audio:'Audioanalyse',diagnostics:'Streamdiagnose',imports:'Importgeschiedenis', 'country-management':'Landen beheren'};
 let stations = [];
 let managedCountries = [];
+const radioView = document.querySelector('#radio-view');
+const radioIdle = document.querySelector('#radio-idle');
 const radioPlayer = document.querySelector('#radio-player');
 const radioAudio = document.querySelector('#radio-audio');
 const spectrogramCanvas = document.querySelector('#radio-spectrogram');
 const spectrogram = spectrogramCanvas.getContext('2d');
-let audioContext, analyser, audioSource, spectrumFrame, captureNode, captureModule;
+let audioContext, analyser, audioSource, spectrumFrame, captureNode, captureSilence, captureModule;
 let currentCodec = '';
 let streamStartTimer;
 let currentStationId = '', audioProfile = null, dspAvailable = false, latestLiveFrame = null, classifying = false, liveGeneration = 0;
 let metadataPollTimer;
+let renderedMetadata = '';
+let renderedHeaders = '';
+let currentStreamMetadata;
+const icyDetections = new Map();
+const audioCategories = {
+  music: 'Muziek', speech: 'Spraak', speech_over_music: 'Spraak over muziek',
+  singing: 'Zang', jingle: 'Jingle', uncertain: 'Onbekend',
+};
+
+function audioCategory(category) {
+  return Object.hasOwn(audioCategories, category) ? audioCategories[category] : 'Onbekend';
+}
+
+function icyEntryKey(entry) {
+  return entry?.time && entry.raw_icy ? JSON.stringify([entry.time, entry.raw_icy]) : '';
+}
+
+function recordIcyDetection(key, result, capturedAt) {
+  if (!key) return false;
+  const recognition = icyDetections.get(key) || {categories: new Set()};
+  const label = audioCategory(result.category);
+  if (recognition.latest?.label === label) return false;
+  recognition.categories.add(label);
+  recognition.latest = {label, confidence: result.confidence, capturedAt};
+  icyDetections.set(key, recognition);
+  if (icyDetections.size > 100) icyDetections.delete(icyDetections.keys().next().value);
+  return true;
+}
+
+const streamDetails = document.querySelector('#radio-metadata-details');
+const streamHeaders = document.querySelector('#radio-metadata-headers');
+const duckingHistory = document.querySelector('#radio-ducking-history');
+const metadataCopy = document.querySelector('#radio-metadata-copy');
+const streamTitleCategories = {
+  music: 'Muziek', speech: 'Spraak', jingle: 'Jingle', advertisement: 'Reclame', news: 'Nieuws',
+};
+const streamTitleLabels = new Map();
+
+function streamTitleLabelKey(title) {
+  return 'smart-radio-title-label:' + JSON.stringify([currentStationId, title]);
+}
+
+function manualCategoryPicker(title, index) {
+  if (!title) return '';
+  const key = streamTitleLabelKey(title);
+  if (!streamTitleLabels.has(key)) {
+    let stored;
+    try { stored = localStorage.getItem(key); } catch {}
+    streamTitleLabels.set(key, Object.hasOwn(streamTitleCategories, stored) ? stored : '');
+  }
+  const selected = streamTitleLabels.get(key);
+  const id = `stream-title-category-${index}`;
+  const options = Object.entries(streamTitleCategories).map(([value, label]) =>
+    `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('');
+  return `<label class="stream-title-category" for="${id}">Handmatig label</label><select id="${id}" class="select stream-title-category-select" data-title-key="${escape(key)}"><option value="">Geen label</option>${options}</select>`;
+}
+
+streamDetails.addEventListener('change', event => {
+  const select = event.target.closest('.stream-title-category-select');
+  if (!select) return;
+  const key = select.dataset.titleKey;
+  const value = Object.hasOwn(streamTitleCategories, select.value) ? select.value : '';
+  streamTitleLabels.set(key, value);
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {}
+  streamDetails.querySelectorAll('.stream-title-category-select').forEach(picker => {
+    if (picker.dataset.titleKey === key) picker.value = value;
+  });
+});
+
+streamDetails.addEventListener('focusout', event => {
+  if (event.target.matches('.stream-title-category-select')) {
+    requestAnimationFrame(() => {
+      if (currentStreamMetadata) renderStreamMetadata(currentStreamMetadata);
+    });
+  }
+});
+
+const duckingAdvice = {
+  speech: 'Dempingssuggestie · Spraak',
+  jingle: 'Dempingssuggestie · Jingle',
+  speech_over_music: 'Demping overwegen · Spraak over muziek',
+};
+const stationDuckingHistory = new Map();
+let lastDuckingDetection;
+const duckingStorageKey = uuid => `smart-radio-ducking-history:${uuid}`;
+
+function metadataRow(label, value, recognition = '', className = '', picker = '') {
+  return `<dl class="radio-metadata-row ${className}"><dt>${escape(label)}</dt><dd><code>${escape(value)}</code>${recognition ? `<span class="radio-metadata-recognition">Herkend: ${escape(recognition)}</span>` : ''}${picker}</dd></dl>`;
+}
+
+function loadDuckingHistory(uuid) {
+  if (!stationDuckingHistory.has(uuid)) {
+    let entries = [];
+    try {
+      const stored = JSON.parse(localStorage.getItem(duckingStorageKey(uuid)));
+      if (Array.isArray(stored)) entries = stored;
+    } catch {}
+    stationDuckingHistory.set(uuid, entries);
+  }
+  return stationDuckingHistory.get(uuid);
+}
+
+function renderDuckingHistory(uuid) {
+  duckingHistory.innerHTML = loadDuckingHistory(uuid).map(entry =>
+    metadataRow(`Demping · ${new Date(entry.time).toLocaleString('nl-NL')}`, entry.text, entry.recognition || entry.text.split(' · ')[1] || 'Onbekend', 'radio-ducking-entry')).join('');
+  duckingHistory.parentElement.hidden = !duckingHistory.firstElementChild;
+}
+
+function recordDuckingDetection(result) {
+  const category = result?.category;
+  if (!(result?.confidence >= 0.75) || !Object.hasOwn(duckingAdvice, category)) {
+    lastDuckingDetection = undefined;
+    return;
+  }
+  const time = Date.now();
+  const repeated = lastDuckingDetection?.category === category && time - lastDuckingDetection.time < 8000;
+  lastDuckingDetection = {category, time};
+  if (repeated) return;
+
+  const text = `${duckingAdvice[category]} · Modelscore ${Math.round(result.confidence * 100)}%`;
+  const entries = loadDuckingHistory(currentStationId);
+  entries.unshift({time, text, recognition: audioCategory(category)});
+  entries.length = Math.min(entries.length, 100);
+  try { localStorage.setItem(duckingStorageKey(currentStationId), JSON.stringify(entries)); } catch {}
+  renderDuckingHistory(currentStationId);
+  metadataCopy.disabled = false;
+}
 
 async function api(path, options) {
   const management=path.startsWith('/api/');
@@ -27,19 +159,84 @@ async function api(path, options) {
     sessionStorage.setItem('smart-radio-api-token',token);
   }
   const type = response.headers.get('content-type') || '';
+  if (response.ok && type.startsWith('audio/wav')) return response.blob();
   const payload = type.includes('json') ? await response.json() : await response.text();
   if (!response.ok) throw new Error(payload.error || response.statusText);
   return payload;
 }
-function route() { return decodeURIComponent(location.hash.slice(1) || 'dashboard'); }
+function route() { return decodeURIComponent(location.hash.slice(1) || 'player'); }
 function navActive(page) {
   document.querySelectorAll('nav a').forEach(item => item.classList.toggle('active', item.dataset.page === page));
 }
+const countryNav = document.querySelector('#country-nav');
+const favoriteNav = document.querySelector('#favorite-nav');
+let catalog;
+
+function stationGroup(page, label, list, previous) {
+  const group = document.createElement('details');
+  group.className = 'station-nav-group';
+  group.dataset.group = page;
+  group.open = previous?.open ?? page === 'favorites';
+  const management = page === 'country/unknown' ? '' : `<a href="#${escape(encodeURI(page))}" data-page="${escape(page)}">Zenders beheren</a>`;
+  group.innerHTML = `<summary>${escape(label)}</summary><div class="station-nav-body"><input type="search" placeholder="Zoek zender" aria-label="${escape('Zoek zender in ' + label)}">${management}<div class="station-nav-results"></div></div>`;
+  const search = group.querySelector('input');
+  const results = group.querySelector('.station-nav-results');
+  search.value = previous?.querySelector('input').value || '';
+  const update = () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    results.innerHTML = list.filter(station => `${station.name} ${station.tags || ''} ${station.language || ''}`.toLocaleLowerCase().includes(query))
+      .map(station => `<button type="button" ${playAttributes(station)} aria-pressed="${station.uuid === currentStationId}">${escape(station.name)}</button>`).join('')
+      || '<p role="status">Geen zenders gevonden.</p>';
+  };
+  search.addEventListener('input', update);
+  group.addEventListener('toggle', () => { if (group.open) update(); });
+  if (group.open) update();
+  return group;
+}
+
 async function loadCountryNav() {
-  const nav=document.querySelector('#country-nav');
-  try { managedCountries=await api('/api/countries'); }
-  catch { managedCountries=[]; }
-  nav.innerHTML=managedCountries.map(country=>`<a href="#country/${encodeURIComponent(country.code)}" data-page="country/${escape(country.code)}"><span class="flag">${escape(country.code)}</span> ${escape(country.name)}</a>`).join('');
+  try { managedCountries = await api('/api/countries') || []; }
+  catch { managedCountries = []; }
+  try { catalog = await api('/api/stations') || []; }
+  catch { catalog = undefined; favoriteNav.textContent = 'Zenderlijst niet beschikbaar.'; return; }
+
+  const previous = new Map([...document.querySelectorAll('.station-nav-group')].map(group => [group.dataset.group, group]));
+  const groups = new Map(managedCountries.map(country => [country.code, {label: country.name, stations: []}]));
+  const available = catalog.filter(station => !station.excluded).sort((a, b) => a.name.localeCompare(b.name, 'nl'));
+  for (const station of available) {
+    const code = station.country_code || 'unknown';
+    if (!groups.has(code)) groups.set(code, {label: station.country || station.country_code || 'Onbekend land', stations: []});
+    groups.get(code).stations.push(station);
+  }
+  favoriteNav.replaceChildren(stationGroup('favorites', 'Favorieten', available.filter(station => station.favorite), previous.get('favorites')));
+  countryNav.replaceChildren(...[...groups].sort(([, a], [, b]) => a.label.localeCompare(b.label, 'nl')).map(([code, group]) => {
+    const page = `country/${code}`;
+    return stationGroup(page, group.label, group.stations, previous.get(page));
+  }));
+}
+
+function playAttributes(station) {
+  return `data-play="${escape(station.uuid)}" data-station-name="${escape(station.name)}" data-codec="${escape(station.codec || '')}" data-bitrate="${station.bitrate || 0}"`;
+}
+
+function updateCurrentStation() {
+  document.querySelectorAll('.station-nav-results [data-play]').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.play === currentStationId));
+  });
+}
+
+function showView(page) {
+  navActive(page);
+  const player = page === 'player';
+  content.hidden = player;
+  radioView.hidden = !player;
+  title.textContent = titles[page] || '';
+}
+
+function openPlayer(focusTarget) {
+  if (route() !== 'player') history.pushState(null, '', '#player');
+  showView('player');
+  if (focusTarget) document.querySelector(focusTarget).focus();
 }
 function escape(value='') { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function pageHeader(kicker, heading, description, action='') {
@@ -51,10 +248,12 @@ function stationCard(station) {
   const logo = station.logo_url ? `<img class="logo" src="${escape(station.logo_url)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'logo logo-fallback',textContent:'SR'}))">` : '<div class="logo logo-fallback">SR</div>';
   const tags=stationTags(station);
   const tagMarkup=tags.length?tags.map(tag=>`<span class="tag">${escape(tag)}</span>`).join(''):'<span class="station-no-genre">Geen zenderlabels</span>';
-  return `<article class="station ${station.excluded?'excluded':''}"><div class="station-top">${logo}<div class="station-title"><strong title="${escape(station.name)}">${escape(station.name)}</strong><span>${escape(station.country || station.country_code || 'Onbekend land')}${station.excluded?' · uitgesloten':''}</span></div><button class="star ${station.favorite?'on':''}" data-favorite="${escape(station.uuid)}" aria-label="${station.favorite?'Verwijder favoriet':'Maak favoriet'}">${station.favorite?'★':'☆'}</button><button class="button quiet exclude-button" data-excluded="${escape(station.uuid)}" aria-label="${station.excluded?'Zender weer opnemen':'Zender uitsluiten'}">${station.excluded?'Opnemen':'Uitsluiten'}</button></div><div class="station-genres" aria-label="Radio Browser-zenderlabels"><span class="station-genre-label">Genres / zenderlabels</span>${tagMarkup}</div><div class="station-meta"><span>${escape(station.codec || 'Stream')} ${station.bitrate ? `· ${station.bitrate} kbps` : ''}</span><span>${escape(station.language || '')}</span></div><div class="station-actions"><button class="button quiet" type="button" data-play="${escape(station.uuid)}" data-station-name="${escape(station.name)}" data-codec="${escape(station.codec || '')}" data-bitrate="${station.bitrate || 0}">Luister</button><button class="button quiet" type="button" data-streamdata="${escape(station.uuid)}">Streamdata</button><button class="button quiet" type="button" data-metadata-record="${escape(station.uuid)}" data-recording="false">Metadata opnemen</button><span class="metadata-record-status" data-metadata-record-status="${escape(station.uuid)}" role="status"></span><button class="button quiet station-delete" type="button" data-delete-station="${escape(station.uuid)}" data-station-name="${escape(station.name)}" data-source="${escape(station.source)}">Verwijderen</button></div></article>`;
+  return `<article class="station ${station.excluded?'excluded':''}"><div class="station-top">${logo}<div class="station-title"><strong title="${escape(station.name)}">${escape(station.name)}</strong><span>${escape(station.country || station.country_code || 'Onbekend land')}${station.excluded?' · uitgesloten':''}</span></div><button class="star ${station.favorite?'on':''}" data-favorite="${escape(station.uuid)}" aria-label="${station.favorite?'Verwijder favoriet':'Maak favoriet'}">${station.favorite?'★':'☆'}</button><button class="button quiet exclude-button" data-excluded="${escape(station.uuid)}" aria-label="${station.excluded?'Zender weer opnemen':'Zender uitsluiten'}">${station.excluded?'Opnemen':'Uitsluiten'}</button></div><div class="station-genres" aria-label="Radio Browser-zenderlabels"><span class="station-genre-label">Genres / zenderlabels</span>${tagMarkup}</div><div class="station-meta"><span>${escape(station.codec || 'Stream')} ${station.bitrate ? `· ${station.bitrate} kbps` : ''}</span><span>${escape(station.language || '')}</span></div><div class="station-actions"><button class="button quiet" type="button" ${playAttributes(station)}>Luister</button><button class="button quiet" type="button" data-streamdata="${escape(station.uuid)}">Streamdata</button><button class="button quiet" type="button" data-metadata-record="${escape(station.uuid)}" data-recording="false">Metadata opnemen</button><span class="metadata-record-status" data-metadata-record-status="${escape(station.uuid)}" role="status"></span><button class="button quiet station-delete" type="button" data-delete-station="${escape(station.uuid)}" data-station-name="${escape(station.name)}" data-source="${escape(station.source)}">Verwijderen</button></div></article>`;
 }
 function renderStations(list) { return list.length ? `<div class="station-grid">${list.map(stationCard).join('')}</div>` : '<div class="panel empty">Geen zenders gevonden. Synchroniseer de catalogus of voeg een eigen zender toe.</div>'; }
-async function loadStations(params='') { stations = await api(`/api/stations${params}`); }
+async function loadStations(params='') {
+  stations = !params && catalog ? catalog : await api(`/api/stations${params}`) || [];
+}
 function stationPickerMarkup(prefix) {
   const countries=new Map(),managedByCode=new Map(),countryByCode=new Map();
   for(const country of managedCountries) {
@@ -224,9 +423,59 @@ async function showCountryManagement() {
     try { const restored=await api(`/api/station-blocks/${encodeURIComponent(button.dataset.station)}/restore`,{method:'POST'}); const active=await api('/api/countries'); if(active.some(country=>country.code===restored.country_code)) await api(`/api/countries/${encodeURIComponent(restored.country_code)}/sync`,{method:'POST'}); await render(); } catch(error) { alert(error.message); }
   }));
 }
+let learningPreviewURL;
+
+function clearLearningPreview() {
+  if (!learningPreviewURL) return;
+  URL.revokeObjectURL(learningPreviewURL);
+  learningPreviewURL = undefined;
+}
+
+async function showLearningRecordings() {
+  const recordings = await api('/api/learning/candidates');
+  if (route() !== 'learning-recordings') return;
+  const typeLabels = {manual: 'Handmatige opname', transition: 'Herkenningsovergang', fingerprint: 'Herhaald fragment'};
+  const list = recordings.map(recording => {
+    const time = new Date(recording.first_seen).toLocaleString('nl-NL');
+    const type = Object.hasOwn(typeLabels, recording.type) ? typeLabels[recording.type] : 'Leerfragment';
+    return `<li><button class="button quiet" type="button" data-recording-id="${escape(recording.id)}">Luister</button><span>${escape(recording.station_name)} · ${escape(time)} · ${type}</span></li>`;
+  }).join('');
+  content.innerHTML = `<div class="page-heading"><h1>Leerfragmenten</h1></div><section class="panel">${list
+    ? `<ul class="learning-recordings-list">${list}</ul><p id="learning-preview-status" class="subtitle" role="status"></p><audio id="learning-preview" controls hidden aria-label="Opgeslagen leerfragment"></audio>`
+    : '<p>Nog geen leerfragmenten opgeslagen.</p>'}</section>`;
+  const preview = document.querySelector('#learning-preview');
+  if (!preview) return;
+  const status = document.querySelector('#learning-preview-status');
+  for (const button of content.querySelectorAll('[data-recording-id]')) {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      status.textContent = 'Fragment laden…';
+      try {
+        const wav = await api(`/api/learning/candidates/${encodeURIComponent(button.dataset.recordingId)}/preview`);
+        if (!preview.isConnected || route() !== 'learning-recordings') return;
+        clearLearningPreview();
+        learningPreviewURL = URL.createObjectURL(wav);
+        preview.src = learningPreviewURL;
+        preview.hidden = false;
+        status.textContent = button.nextElementSibling.textContent;
+        await preview.play().catch(() => {});
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+}
+
 async function render() {
-  const page=route();await loadCountryNav();navActive(page);title.textContent=titles[page]|| (page.startsWith('country/') ? (managedCountries.find(item=>item.code===page.split('/')[1])?.name||'') : '');content.innerHTML='<div class="loading">Laden…</div>';
-  try { if(page==='dashboard')await showDashboard();else if(['stations','favorites','genres','countries','custom'].includes(page)||page.startsWith('country/'))await showStations(page);else if(page==='audio')await showAudio();else if(page==='diagnostics')await showDiagnostics();else if(page==='imports')await showImports();else if(page==='country-management')await showCountryManagement();else await showStations('stations'); }
+  await loadCountryNav();
+  const page = route();
+  clearLearningPreview();
+  showView(page);
+  if (page === 'player') return;
+  content.innerHTML = '<div class="loading">Laden…</div>';
+  try { if(page==='dashboard')await showDashboard();else if(['stations','favorites','genres','countries','custom'].includes(page)||page.startsWith('country/'))await showStations(page);else if(page==='audio')await showAudio();else if(page==='learning-recordings')await showLearningRecordings();else if(page==='diagnostics')await showDiagnostics();else if(page==='imports')await showImports();else if(page==='country-management')await showCountryManagement();else await showStations('stations'); }
   catch(error){content.innerHTML=`<section class="panel error">${escape(error.message)}<p><button class="button" onclick="location.reload()">Opnieuw laden</button></p></section>`;}
 }
 document.querySelector('#sync-button').onclick=async event=>{const button=event.currentTarget;button.disabled=true;button.textContent='Synchroniseren…';try{await api('/api/sync',{method:'POST'});await render();}catch(error){alert(`Synchronisatie mislukt: ${error.message}`);}finally{button.disabled=false;button.textContent='Nu synchroniseren';}};
@@ -236,30 +485,81 @@ content.addEventListener('click',async event=>{const button=event.target.closest
 content.addEventListener('click',event=>{
   const button=event.target.closest('[data-streamdata]');if(!button)return;
   const uuid=button.dataset.streamdata;
-  if(uuid!==currentStationId)[...content.querySelectorAll('[data-play]')].find(item=>item.dataset.play===uuid)?.click();
-  document.querySelector('#radio-metadata-rows').innerHTML='<p class="loading">Streamdata laden…</p>';
-  metadataDialog.showModal();
+  if (uuid !== currentStationId) playStation(button.closest('.station').querySelector('[data-play]'));
+  openPlayer('#radio-metadata-title');
 });
 content.addEventListener('click',async event=>{
   const button=event.target.closest('[data-metadata-record]');if(!button)return;
   const station=button.dataset.metadataRecord,stopping=button.dataset.recording==='true';
-  if(station!==currentStationId)[...content.querySelectorAll('[data-play]')].find(item=>item.dataset.play===station)?.click();
+  if (station !== currentStationId) {
+    const play = button.closest('.station').querySelector('[data-play]');
+    playStation(play);
+  }
   button.disabled=true;
   try {
     const payload=await api(`/api/stations/${encodeURIComponent(station)}/metadata-recording`,{method:stopping?'DELETE':'POST'});
     if(stopping){const download=document.createElement('a');download.href=URL.createObjectURL(new Blob([payload],{type:'application/x-ndjson'}));download.download=`radio-metadata-${new Date().toISOString().replace(/[:.]/g,'-')}.jsonl`;download.click();setTimeout(()=>URL.revokeObjectURL(download.href),1000);}
     showMetadataRecording(!stopping,station);
-  } catch(error) { document.querySelector(`[data-metadata-record-status="${CSS.escape(station)}"]`).textContent=error.message; }
+  } catch(error) { button.closest('.station').querySelector('[data-metadata-record-status]').textContent=error.message; }
   finally { button.disabled=false; }
 });
-content.addEventListener('click', async event => {
+function selectStation(event) {
   const button = event.target.closest('[data-play]');
   if (!button) return;
+  if (button.dataset.play !== currentStationId) playStation(button);
+  openPlayer(content.contains(button) ? '#radio-heading' : '');
+}
+
+content.addEventListener('click', selectStation);
+countryNav.addEventListener('click', selectStation);
+favoriteNav.addEventListener('click', selectStation);
+
+function renderPlayerStation(station) {
+  document.querySelector('#radio-player-name').textContent = station.name;
+  const country = managedCountries.find(item => item.code === station.country_code)?.name || station.country || station.country_code;
+  document.querySelector('#radio-station-location').textContent = [country, station.language].filter(Boolean).join(' · ');
+  document.querySelector('#radio-station-genres').innerHTML = stationTags(station).map(tag => `<span class="tag">${escape(tag)}</span>`).join('');
+
+  const logo = document.querySelector('#radio-station-logo');
+  const fallback = document.createElement('span');
+  fallback.className = 'logo logo-fallback';
+  fallback.textContent = Array.from(station.name.trim()).slice(0, 2).join('').toLocaleUpperCase() || 'SR';
+  logo.replaceChildren(fallback);
+  const wordmark = station.uuid === '05de6435-c3e5-4d69-8e55-8818e48bbbd3' ? '/brand/jolene-country-radio.svg' : '';
+  const logoURL = station.logo_url?.trim() || wordmark;
+  if (logoURL) {
+    const image = document.createElement('img');
+    image.className = 'logo';
+    image.alt = '';
+    image.referrerPolicy = 'no-referrer';
+    image.addEventListener('error', () => image.replaceWith(fallback), {once: true});
+    if (logoURL === wordmark) image.classList.add('station-wordmark');
+    image.src = logoURL;
+    logo.replaceChildren(image);
+  }
+
+  const website = document.querySelector('#radio-station-website');
+  let url;
+  try { url = new URL(station.homepage); } catch {}
+  website.hidden = !url || !['https:', 'http:'].includes(url.protocol);
+  if (website.hidden) website.removeAttribute('href');
+  else website.href = url.href;
+}
+
+async function playStation(button) {
+  stopLiveAnalysis();
   radioPlayer.hidden = false;
-  document.body.classList.add('radio-playing');
-  document.querySelector('#radio-player-name').textContent = button.dataset.stationName;
+  document.querySelector('#radio-metadata-rows').scrollTop = 0;
+  radioIdle.hidden = true;
   currentStationId = button.dataset.play;
+  const station = catalog?.find(item => item.uuid === currentStationId) || stations.find(item => item.uuid === currentStationId);
+  renderPlayerStation(station || {name: button.dataset.stationName});
+  updateCurrentStation();
   latestLiveFrame = null;
+  lastDuckingDetection = undefined;
+  duckingHistory.parentElement.open = false;
+  streamHeaders.parentElement.open = false;
+  renderDuckingHistory(currentStationId);
   document.querySelector('#radio-track-artist').textContent = '';
   document.querySelector('#radio-track-title').textContent = 'Wachten op streammetadata…';
   const sourceURL = document.querySelector('#radio-stream-url');
@@ -267,9 +567,12 @@ content.addEventListener('click', async event => {
   sourceURL.removeAttribute('title');
   document.querySelector('#radio-copy-url').disabled = true;
   document.querySelector('#radio-copy-status').textContent = '';
-  document.querySelector('#radio-metadata-summary').textContent = 'Wachten op streammetadata…';
-  document.querySelector('#radio-metadata-rows').innerHTML = '';
-  document.querySelector('#radio-metadata-copy').disabled = true;
+  renderedMetadata = '';
+  renderStreamHeaders([]);
+  currentStreamMetadata = undefined;
+  icyDetections.clear();
+  streamDetails.innerHTML = '<p class="loading" role="status">Streamdata laden…</p>';
+  metadataCopy.disabled = !duckingHistory.firstElementChild;
   document.querySelector('#radio-metadata-copy-status').textContent = '';
   startMetadataPolling(currentStationId);
   loadRadioDSP(currentStationId).catch(error => { document.querySelector('#radio-dsp-status').textContent = error.message; });
@@ -284,31 +587,18 @@ content.addEventListener('click', async event => {
   streamStartTimer=setTimeout(()=>{if(radioAudio.readyState<1)setRadioStatus('Na 10 seconden nog geen afspeelbare audio ontvangen. De stream kan offline zijn of een browser-incompatibel formaat gebruiken.');},10000);
   try { await radioAudio.play(); }
   catch { setRadioStatus('Afspelen startte niet. Controleer de browsermelding of druk op Afspelen.'); }
-});
-document.querySelector('#radio-stop').addEventListener('click', () => {
-  radioAudio.pause();
-  clearTimeout(streamStartTimer);
-  radioAudio.removeAttribute('src');
-  radioAudio.load();
-  cancelAnimationFrame(spectrumFrame);
-  stopLiveAnalysis();
-  currentStationId = '';
-  audioProfile = null;
-  document.querySelector('#radio-dsp-toggle').disabled = true;
-  document.querySelector('#radio-dsp-toggle').textContent = 'DSP';
-  document.querySelector('#radio-dsp-status').textContent = 'Selecteer een zender';
-  document.querySelector('#radio-suppression-status').textContent = '';
-  radioPlayer.classList.remove('radio-suppressed');
-  document.querySelector('#radio-stream-url').textContent = 'Selecteer een zender';
-  document.querySelector('#radio-copy-url').disabled = true;
-  document.querySelector('#radio-copy-status').textContent = '';
-  spectrogram.clearRect(0,0,spectrogramCanvas.width,spectrogramCanvas.height);
-  clearInterval(metadataPollTimer);
-  radioPlayer.hidden = true;
-  document.body.classList.remove('radio-playing');
-});
+}
 function setRadioStatus(message) { document.querySelector('#radio-player-status').textContent=message; }
+function renderStreamHeaders(rows) {
+  const markup = rows.filter(([, value]) => value).map(([label, value]) => metadataRow(label, value)).join('');
+  if (renderedHeaders === markup) return;
+  streamHeaders.innerHTML = markup;
+  streamHeaders.parentElement.hidden = !markup;
+  renderedHeaders = markup;
+}
+
 function renderStreamMetadata(metadata) {
+  currentStreamMetadata = metadata;
   const headers = metadata.headers || {};
   const header = name => {
     const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name);
@@ -318,41 +608,52 @@ function renderStreamMetadata(metadata) {
   const description = header('icy-description').trim();
   const genre = header('icy-genre').trim();
   const sameName = name && description && name.toLocaleLowerCase() === description.toLocaleLowerCase();
-  document.querySelector('#radio-metadata-summary').innerHTML = [
-    name && `<span><b>Name</b> ${escape(name)}</span>`,
-    description && !sameName && `<span><b>Description</b> ${escape(description)}</span>`,
-    genre && `<span><b>Genre</b> ${escape(genre)}</span>`,
-  ].filter(Boolean).join('');
-
   const rawICY = metadata.raw_icy || '';
-  const streamTitleMatch = rawICY.match(/(?:^|;)\s*StreamTitle\s*=\s*(['\"])(.*?)\1/i);
-  const streamTitle = streamTitleMatch ? streamTitleMatch[2] : metadata.title || '';
+  const titleFromICY = raw => raw?.match(/(?:^|;)\s*StreamTitle\s*=\s*(['"])(.*?)\1(?=\s*(?:;|$))/i)?.[2]?.trim();
+  const streamTitle = titleFromICY(rawICY) || metadata.title || '';
   const history = Array.isArray(metadata.icy_history) ? metadata.icy_history : [];
-  const icyRows = history.length ? history.map(item => {
+  const icyRows = history.length ? [...history].reverse().map(item => {
     const time = item.time ? new Date(item.time).toLocaleString() : 'tijd onbekend';
-    return [`ICY · ${time}`, `raw_icy: ${item.raw_icy || ''}${item.streamtitle ? ` | streamtitle: ${item.streamtitle}` : ''}`];
-  }) : [['ICY', `raw_icy: ${rawICY || 'Nog geen ICY-metadatablok ontvangen'} | streamtitle: ${streamTitle || 'Geen StreamTitle ontvangen'}`]];
-  const rows = [
+    const recognized = icyDetections.get(icyEntryKey(item));
+    let recognition = 'Onbekend';
+    if (recognized) {
+      const {label, confidence, capturedAt} = recognized.latest;
+      const timestamp = new Date(capturedAt).toLocaleTimeString('nl-NL');
+      const earlier = [...recognized.categories].filter(category => category !== label);
+      recognition = `${label} · Modelscore ${Math.round(confidence * 100)}% · sinds ${timestamp}`;
+      if (earlier.length) recognition += ` · Eerder: ${earlier.join(', ')}`;
+    }
+    const title = titleFromICY(item.raw_icy) || item.streamtitle?.trim() || '';
+    return [`ICY · ${time}`, `raw_icy: ${item.raw_icy || ''}${title ? ` | streamtitle: ${title}` : ''}`, recognition, title];
+  }) : [['ICY', `raw_icy: ${rawICY || 'Nog geen ICY-metadatablok ontvangen'} | streamtitle: ${streamTitle || 'Geen StreamTitle ontvangen'}`, rawICY || streamTitle ? 'Onbekend' : '', streamTitle]];
+  renderStreamHeaders([
     ['HTTP-respons', [metadata.protocol, metadata.status].filter(Boolean).join(' ')],
     ['Name', name],
     ...(!sameName && description ? [['Description', description]] : []),
     ['Genre', genre],
     ...Object.entries(headers).filter(([key]) => !['icy-name', 'icy-description', 'icy-genre'].includes(key.toLowerCase())).sort(([a], [b]) => a.localeCompare(b)).flatMap(([key, values]) =>
       (Array.isArray(values) ? values : [values]).map(value => [key, value])),
-    ...icyRows,
-  ];
-  document.querySelector('#radio-metadata-rows').innerHTML = rows.map(([label, value]) =>
-    `<dl class="radio-metadata-row"><dt>${escape(label)}</dt><dd><code>${escape(value)}</code></dd></dl>`).join('');
-  document.querySelector('#radio-metadata-copy').disabled = false;
-  document.querySelector('#radio-metadata-copy-status').textContent = '';
+  ]);
+  const markup = icyRows.map(([label, value, recognition, title], index) =>
+    metadataRow(label, value, recognition, '', manualCategoryPicker(title, index))).join('');
+  // Keep the native picker open while live streamdata arrives.
+  if (renderedMetadata !== markup && !streamDetails.contains(document.activeElement)) {
+    streamDetails.innerHTML = markup;
+    renderedMetadata = markup;
+  }
+  metadataCopy.disabled = false;
 }
 
-const metadataDialog = document.querySelector('#radio-metadata-dialog');
-document.querySelector('#radio-metadata-close').addEventListener('click', () => metadataDialog.close());
-document.querySelector('#radio-metadata-done').addEventListener('click', () => metadataDialog.close());
-document.querySelector('#radio-metadata-copy').addEventListener('click', async () => {
+metadataCopy.addEventListener('click', async () => {
   const rows = [...document.querySelectorAll('#radio-metadata-rows .radio-metadata-row')];
-  const text = rows.map(row => `${row.querySelector('dt').textContent}: ${row.querySelector('dd').textContent}`).join('\n') + '\n';
+  const text = rows.map(row => {
+    const label = row.querySelector('dt').textContent;
+    const value = row.querySelector('code').textContent;
+    const recognition = row.querySelector('.radio-metadata-recognition')?.textContent;
+    const category = row.querySelector('.stream-title-category-select')?.value;
+    const manualLabel = category ? `Handmatig label: ${streamTitleCategories[category]}` : '';
+    return [`${label}: ${value}`, recognition, manualLabel].filter(Boolean).join('\n  ');
+  }).join('\n') + '\n';
   const slug = document.querySelector('#radio-player-name').textContent.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w.-]+/g, '-').replace(/^-|-$/g, '') || 'stream';
   const blobURL = URL.createObjectURL(new Blob([text], {type:'text/plain;charset=utf-8'}));
   const download = document.createElement('a');
@@ -386,9 +687,11 @@ function startMetadataPolling(uuid) {
       document.querySelector('#radio-track-title').textContent='Streammetadata niet beschikbaar';
       radioPlayer.classList.remove('radio-suppressed');
       document.querySelector('#radio-suppression-status').textContent = '';
-      document.querySelector('#radio-metadata-summary').textContent = 'Streammetadata niet beschikbaar';
-      document.querySelector('#radio-metadata-rows').innerHTML = '<dl class="radio-metadata-row"><dt>Metadata</dt><dd><code>Niet beschikbaar</code></dd></dl>';
-      document.querySelector('#radio-metadata-copy').disabled = true;
+      renderedMetadata = '';
+      currentStreamMetadata = undefined;
+      renderStreamHeaders([]);
+      streamDetails.innerHTML = metadataRow('Metadata', 'Niet beschikbaar');
+      metadataCopy.disabled = !duckingHistory.firstElementChild;
       const sourceURL=document.querySelector('#radio-stream-url');
       sourceURL.textContent='Bronstream niet beschikbaar';
       sourceURL.removeAttribute('title');
@@ -448,32 +751,171 @@ document.querySelector('#radio-copy-url').addEventListener('click',async()=>{
   try { await navigator.clipboard.writeText(url);document.querySelector('#radio-copy-status').textContent='Stream-URL gekopieerd'; }
   catch { document.querySelector('#radio-copy-status').textContent='Kopiëren niet beschikbaar; selecteer de URL handmatig.'; }
 });
+const learnButton = document.querySelector('#radio-learn');
+const learnStatus = document.querySelector('#radio-learn-status');
+const learnRetry = document.querySelector('#radio-learn-retry');
+let pendingLearningRecording;
+let learningRecording;
+
+function recordingWAV(chunks, byteLength) {
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const writeText = (offset, value) => {
+    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  writeText(0, 'RIFF');
+  view.setUint32(4, 36 + byteLength, true);
+  writeText(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 16000, true);
+  view.setUint32(28, 32000, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, 'data');
+  view.setUint32(40, byteLength, true);
+  return new Blob([header, ...chunks], {type: 'audio/wav'});
+}
+
+async function saveLearningRecording() {
+  if (!pendingLearningRecording) return;
+  const recording = pendingLearningRecording;
+  learnRetry.hidden = true;
+  learnButton.disabled = true;
+  learnStatus.textContent = 'Leerfragment opslaan…';
+  try {
+    await api('/api/learning/recordings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'audio/wav',
+        'X-Station-ID': recording.station,
+        'X-Recording-Started': recording.startedAt.toISOString(),
+      },
+      body: recording.wav,
+    });
+    pendingLearningRecording = undefined;
+    learnStatus.textContent = `Opgeslagen · ${recording.duration} s, inclusief ${recording.preRoll} s aanloop.`;
+    learnButton.disabled = !captureNode || radioAudio.paused;
+    if (route() === 'learning-recordings') showLearningRecordings().catch(() => {});
+  } catch (error) {
+    learnStatus.textContent = `Opslaan mislukt · ${error.message}`;
+    learnRetry.hidden = false;
+  }
+}
+
+learnRetry.addEventListener('click', saveLearningRecording);
+
+function finishLearningRecording(recording) {
+  if (learningRecording !== recording) return;
+  clearTimeout(recording.stopTimer);
+  learningRecording = undefined;
+  learnButton.textContent = 'Leer';
+  if (!recording.bytes) {
+    learnButton.disabled = !captureNode || radioAudio.paused;
+    learnStatus.textContent = 'Geen audio ontvangen voor dit fragment.';
+    return;
+  }
+  const duration = recording.bytes / 32000;
+  pendingLearningRecording = {
+    station: recording.station,
+    startedAt: new Date(recording.startedAt.getTime() - recording.preRoll * 1000),
+    duration: duration.toLocaleString('nl-NL', {maximumFractionDigits: 1}),
+    preRoll: recording.preRoll.toLocaleString('nl-NL', {maximumFractionDigits: 1}),
+    wav: recordingWAV(recording.chunks, recording.bytes),
+  };
+  saveLearningRecording();
+}
+
+function stopLearningRecording() {
+  const recording = learningRecording;
+  if (!recording || recording.stopTimer) return;
+  learnButton.disabled = true;
+  learnStatus.textContent = 'Fragment afronden…';
+  recording.node.port.postMessage('stop-recording');
+  recording.stopTimer = setTimeout(() => finishLearningRecording(recording), 2000);
+}
+
+learnButton.addEventListener('click', () => {
+  if (learningRecording) {
+    stopLearningRecording();
+    return;
+  }
+  if (!captureNode || radioAudio.paused || pendingLearningRecording) return;
+  learningRecording = {node: captureNode, station: currentStationId, startedAt: new Date(), chunks: [], bytes: 0, preRoll: 0};
+  captureNode.port.postMessage('start-recording');
+  learnButton.textContent = 'Stop opname';
+  learnStatus.textContent = 'Opname loopt.';
+});
+
+function handleCaptureMessage(node, data) {
+  if (data instanceof ArrayBuffer) {
+    if (node !== captureNode) return;
+    if (!learningRecording && !pendingLearningRecording && !radioAudio.paused) {
+      learnButton.disabled = false;
+      if (!learnStatus.textContent.startsWith('Opgeslagen')) learnStatus.textContent = 'Neem op met maximaal 10 seconden aanloop.';
+    }
+    classifyLiveFrame(data);
+    return;
+  }
+
+  const recording = learningRecording;
+  if (recording?.node !== node) return;
+  if (data.type === 'recording-chunk') {
+    if (!recording.chunks.length) recording.preRoll = data.samples.byteLength / 32000;
+    recording.bytes += data.samples.byteLength;
+    recording.chunks.push(data.samples);
+  } else if (data.type === 'recording-complete') {
+    finishLearningRecording(recording);
+  }
+}
+
 async function startLiveAnalysis() {
-  if(!audioContext?.audioWorklet||typeof AudioWorkletNode==='undefined'){document.querySelector('#live-detection').textContent='Liveclassifier niet beschikbaar in deze browser';return;}
+  if (!audioContext?.audioWorklet || typeof AudioWorkletNode === 'undefined') {
+    document.querySelector('#live-detection').textContent = 'Liveclassifier niet beschikbaar in deze browser';
+    if (!learningRecording) learnStatus.textContent = 'Opnemen is niet beschikbaar in deze browser.';
+    return;
+  }
   try {
     captureModule ||= audioContext.audioWorklet.addModule('/audio-capture.js');
     await captureModule;
     if(radioAudio.paused||captureNode)return;
     captureNode=new AudioWorkletNode(audioContext,'radio-pcm-capture',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[1]});
-    const silence=audioContext.createGain();silence.gain.value=0;
-    audioSource.connect(captureNode);captureNode.connect(silence);silence.connect(audioContext.destination);
-    captureNode.port.onmessage=event=>classifyLiveFrame(event.data);
+    const node = captureNode;
+    captureSilence = audioContext.createGain();
+    captureSilence.gain.value = 0;
+    audioSource.connect(node);
+    node.connect(captureSilence);
+    captureSilence.connect(audioContext.destination);
+    node.port.onmessage = event => handleCaptureMessage(node, event.data);
     document.querySelector('#live-detection').textContent='Liveanalyse actief · YAMNet';
-  } catch { document.querySelector('#live-detection').textContent='Liveanalyse niet beschikbaar'; }
+  } catch {
+    document.querySelector('#live-detection').textContent = 'Liveanalyse niet beschikbaar';
+    if (!learningRecording) learnStatus.textContent = 'Opnemen is niet beschikbaar.';
+  }
 }
 async function classifyLiveFrame(buffer) {
   if(classifying||radioAudio.paused)return;
   classifying=true;const generation=liveGeneration,station=currentStationId;
-  const pcm=new Float32Array(buffer).slice();
+  const capturedAt = Date.now();
+  const metadata = currentStreamMetadata;
+  const entry = metadata?.icy_history?.at(-1);
+  const icyKey = entry?.raw_icy === metadata?.raw_icy ? icyEntryKey(entry) : '';
   try {
     const result=await api('/api/live-classify',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:buffer});
     if(radioAudio.paused||generation!==liveGeneration||station!==currentStationId)return;
     latestLiveFrame=result;
-    const category={music:'Muziek',speech:'Spraak',speech_over_music:'Spraak over muziek',singing:'Zang',jingle:'Jingle',uncertain:'Onzeker'}[result.category]||'Onzeker';
+    recordDuckingDetection(result);
+    if (recordIcyDetection(icyKey, result, capturedAt) && currentStreamMetadata) renderStreamMetadata(currentStreamMetadata);
+    const category = audioCategory(result.category);
     const top=(result.top_labels||[]).slice(0,3).map(item=>`${item.name} ${Math.round(item.score*100)}%`).join(' · ');
     document.querySelector('#live-detection').textContent=`Model ziet ${category.toLowerCase()} · ${Math.round(result.confidence*100)}%${top?` · Mogelijke model-labels: ${top}`:''}`;
     for(const key of ['music','speech','singing','jingle'])setMeter(key,result[key]);
-  } catch(error) { document.querySelector('#live-detection').textContent=`Liveanalyse niet beschikbaar · ${error.message}`; }
+  } catch(error) {
+    if(generation!==liveGeneration||station!==currentStationId)return;
+    lastDuckingDetection = undefined;
+    document.querySelector('#live-detection').textContent=`Liveanalyse niet beschikbaar · ${error.message}`;
+  }
   finally { if(generation===liveGeneration)classifying=false; }
 }
 function setMeter(name,value) {
@@ -482,7 +924,21 @@ function setMeter(name,value) {
   document.querySelector(`#value-${name}`).textContent=`${Math.round(percent)}%`;
 }
 function clearMeters() { for(const name of ['bass','mid','high'])setMeter(name,0);for(const name of ['speech','singing','jingle','music']){setMeter(name,0);document.querySelector(`#value-${name}`).textContent='—';}document.querySelector('#live-detection').textContent='Wachten op audioanalyse…'; }
-function stopLiveAnalysis() { liveGeneration++;captureNode?.disconnect();captureNode=null;latestLiveFrame=null;classifying=false; }
+function stopLiveAnalysis() {
+  liveGeneration++;
+  stopLearningRecording();
+  if (captureNode) {
+    audioSource.disconnect(captureNode);
+    captureNode.disconnect();
+    captureSilence.disconnect();
+  }
+  captureNode = null;
+  captureSilence = null;
+  learnButton.disabled = true;
+  latestLiveFrame = null;
+  classifying = false;
+  lastDuckingDetection = undefined;
+}
 function drawSpectrum() {
   if(!analyser||radioAudio.paused)return;
   const bins=new Uint8Array(analyser.frequencyBinCount);analyser.getByteFrequencyData(bins);
@@ -512,7 +968,9 @@ radioAudio.addEventListener('waiting', () => setRadioStatus('Bufferen: de browse
 radioAudio.addEventListener('stalled', () => setRadioStatus('Geen nieuwe audiogegevens ontvangen; de stream kan stilvallen.'));
 radioAudio.addEventListener('canplay', () => { clearTimeout(streamStartTimer);setRadioStatus('Browser heeft afspeelbare audiogegevens ontvangen.'); });
 radioAudio.addEventListener('pause', () => { if(!radioAudio.ended&&!radioAudio.error&&radioAudio.currentSrc)setRadioStatus('Afspelen gepauzeerd.');cancelAnimationFrame(spectrumFrame);if(radioAudio.paused)stopLiveAnalysis(); });
+radioAudio.addEventListener('ended', stopLiveAnalysis);
 radioAudio.addEventListener('error', () => {
+  stopLiveAnalysis();
   cancelAnimationFrame(spectrumFrame);
   const code=radioAudio.error?.code;
   const detail=code===4?`Browser ondersteunt het ontvangen formaat niet (${currentCodec||'codec onbekend'}).`:code===3?`Browser kan de audiogegevens niet decoderen (${currentCodec||'codec onbekend'}).`:code===2?'Netwerkfout tijdens het ophalen van de stream.':code===1?'Stream is afgebroken.':'Stream kon niet worden gestart.';

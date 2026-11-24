@@ -1,14 +1,27 @@
 ---
 ijfw_version: 1.3.2
 ijfw_schema: 1
-type: unknown
-primary_type: unknown
+type: software
+primary_type: software
 secondary_types: []
-confidence: 0
-detected_at: 2026-11-21T18:28:50.563Z
-signals: []
+confidence: 0.905
+detected_at: 2026-11-24T06:33:38.505Z
+signals:
+  - kind: agents_md_frontmatter
+    weight: 0.9
+    value: unknown
+  - kind: manifest
+    weight: 0.9
+    manifests: [Makefile, go.mod]
+  - kind: file_extension_ratio
+    weight: 0.7
+    domain: software
+    ratio: 0.975
+    count: 39
 ---
 # AGENTS.md
+
+Begin elk gebruikersgericht bericht, inclusief voortgangsberichten en eindantwoorden, met `Ray:`.
 
 This file follows the open AGENTS.md spec (https://agents.md/) and is the
 canonical agent-instructions surface for this project. Platform-specific

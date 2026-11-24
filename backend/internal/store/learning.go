@@ -95,7 +95,7 @@ func (s *Store) ApprovedStreamFingerprints(ctx context.Context, station string) 
 
 func (s *Store) SaveLearnedCandidate(ctx context.Context, station, fingerprint, candidateType string, preview []byte, firstSeen, lastSeen time.Time, similarity float64, firstTrack, lastTrack, previousCategory, currentCategory string, confidence float64) (bool, error) {
 	occurrences := 2
-	if candidateType == "transition" {
+	if candidateType == "transition" || candidateType == "manual" {
 		occurrences = 1
 	}
 	result, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO learned_fingerprints(station_uuid,fingerprint,preview_wav,first_seen_at,last_seen_at,similarity,first_track,last_track,candidate_type,previous_category,current_category,confidence,occurrences) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -108,8 +108,17 @@ func (s *Store) SaveLearnedCandidate(ctx context.Context, station, fingerprint, 
 }
 
 func (s *Store) LearningCandidates(ctx context.Context) ([]LearningCandidate, error) {
+	return s.learningCandidates(ctx, "")
+}
+
+func (s *Store) ManualLearningCandidates(ctx context.Context) ([]LearningCandidate, error) {
+	return s.learningCandidates(ctx, "manual")
+}
+
+func (s *Store) learningCandidates(ctx context.Context, candidateType string) ([]LearningCandidate, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT f.id,f.station_uuid,s.name,f.occurrences,f.first_seen_at,f.last_seen_at,f.status,f.similarity,f.first_track,f.last_track,f.candidate_type,f.previous_category,f.current_category,f.confidence
-		FROM learned_fingerprints f JOIN stations s ON s.station_uuid=f.station_uuid ORDER BY f.created_at DESC LIMIT 200`)
+		FROM learned_fingerprints f JOIN stations s ON s.station_uuid=f.station_uuid
+		WHERE (? = '' OR f.candidate_type = ?) ORDER BY f.created_at DESC, f.id DESC LIMIT 200`, candidateType, candidateType)
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -199,5 +201,65 @@ func TestCountryAndStationRemovalAPI(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/countries", nil))
 	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), `"code":"NL"`) {
 		t.Fatalf("country remained enabled: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestManualLearningRecordingPersistsAcrossRequests(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "radio.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, _, err = db.ImportStations(context.Background(), []radiobrowser.Station{
+		{UUID: "radio", Name: "Radio", URL: "https://stream.test/live"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wav := make([]byte, 32044)
+	copy(wav, "RIFF")
+	binary.LittleEndian.PutUint32(wav[4:], uint32(len(wav)-8))
+	copy(wav[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(wav[16:], 16)
+	binary.LittleEndian.PutUint16(wav[20:], 1)
+	binary.LittleEndian.PutUint16(wav[22:], 1)
+	binary.LittleEndian.PutUint32(wav[24:], 16000)
+	binary.LittleEndian.PutUint32(wav[28:], 32000)
+	binary.LittleEndian.PutUint16(wav[32:], 2)
+	binary.LittleEndian.PutUint16(wav[34:], 16)
+	copy(wav[36:], "data")
+	binary.LittleEndian.PutUint32(wav[40:], uint32(len(wav)-44))
+
+	handler := testHandler(db)
+	post := func(payload []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/learning/recordings", bytes.NewReader(payload))
+		req.Header.Set("X-Station-ID", "radio")
+		req.Header.Set("X-Recording-Started", "2026-11-24T10:00:00.123Z")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+	if res := post([]byte("invalid")); res.Code != http.StatusBadRequest {
+		t.Fatalf("invalid recording returned %d", res.Code)
+	}
+	for i := 0; i < 2; i++ {
+		if res := post(wav); res.Code != http.StatusNoContent {
+			t.Fatalf("save returned %d: %s", res.Code, res.Body)
+		}
+	}
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/learning/recordings", nil))
+	var recordings []store.LearningCandidate
+	if err := json.Unmarshal(list.Body.Bytes(), &recordings); err != nil {
+		t.Fatal(err)
+	}
+	if len(recordings) != 1 || recordings[0].Type != "manual" || recordings[0].Occurrences != 1 || recordings[0].StationUUID != "radio" {
+		t.Fatalf("unexpected recordings: %+v", recordings)
+	}
+	preview := httptest.NewRecorder()
+	handler.ServeHTTP(preview, httptest.NewRequest(http.MethodGet, recordings[0].PreviewURL, nil))
+	if preview.Code != http.StatusOK || !bytes.Equal(preview.Body.Bytes(), wav) {
+		t.Fatalf("preview returned %d with %d bytes", preview.Code, preview.Body.Len())
 	}
 }

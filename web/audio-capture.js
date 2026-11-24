@@ -5,6 +5,48 @@ class RadioPCMCapture extends AudioWorkletProcessor {
     this.samples = [];
     this.sum = 0;
     this.count = 0;
+    this.history = new Int16Array(16000 * 10);
+    this.historyOffset = 0;
+    this.historyLength = 0;
+    this.recording = false;
+    this.recorded = new Int16Array(15600);
+    this.recordedLength = 0;
+    this.port.onmessage = ({data}) => {
+      if (data === 'start-recording' && !this.recording) {
+        const start = (this.historyOffset - this.historyLength + this.history.length) % this.history.length;
+        const beforeWrap = this.history.subarray(start, start + this.historyLength);
+        const preRoll = new Int16Array(this.historyLength);
+        preRoll.set(beforeWrap);
+        preRoll.set(this.history.subarray(0, this.historyLength - beforeWrap.length), beforeWrap.length);
+        this.sendRecordingChunk(preRoll);
+        this.recording = true;
+      } else if (data === 'stop-recording' && this.recording) {
+        this.flushRecording();
+        this.recording = false;
+        this.port.postMessage({type: 'recording-complete'});
+      }
+    };
+  }
+
+  sendRecordingChunk(samples) {
+    this.port.postMessage({type: 'recording-chunk', samples: samples.buffer}, [samples.buffer]);
+  }
+
+  flushRecording() {
+    if (!this.recordedLength) return;
+    this.sendRecordingChunk(this.recorded.slice(0, this.recordedLength));
+    this.recordedLength = 0;
+  }
+
+  captureSample(sample) {
+    const pcm = Math.round(Math.max(-1, Math.min(1, sample)) * 32767);
+    this.history[this.historyOffset] = pcm;
+    this.historyOffset = (this.historyOffset + 1) % this.history.length;
+    this.historyLength = Math.min(this.historyLength + 1, this.history.length);
+    if (this.recording) {
+      this.recorded[this.recordedLength++] = pcm;
+      if (this.recordedLength === this.recorded.length) this.flushRecording();
+    }
   }
 
   process(inputs, outputs) {
@@ -20,7 +62,9 @@ class RadioPCMCapture extends AudioWorkletProcessor {
       this.phase += ratio;
       if (this.phase >= 1) {
         this.phase -= 1;
-        this.samples.push(this.sum / this.count);
+        const averaged = this.sum / this.count;
+        this.samples.push(averaged);
+        this.captureSample(averaged);
         this.sum = 0;
         this.count = 0;
         if (this.samples.length === 15600) {

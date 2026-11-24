@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
@@ -607,6 +608,22 @@ func newHandler(db *store.Store, proxyBase, apiToken string, devAutoAuth ...bool
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+	mux.HandleFunc("/api/learning/recordings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			recordings, err := db.ManualLearningCandidates(r.Context())
+			if err != nil {
+				http.Error(w, "leerfragmenten niet beschikbaar", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, recordings)
+		case http.MethodPost:
+			saveLearningRecording(w, r, db)
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 	mux.HandleFunc("/api/learning/candidates", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -723,6 +740,55 @@ func newHandler(db *store.Store, proxyBase, apiToken string, devAutoAuth ...bool
 }
 
 const livePCMBytes = 15600 * 4
+
+const maxLearningRecordingBytes = 64 << 20
+
+func saveLearningRecording(w http.ResponseWriter, r *http.Request, db *store.Store) {
+	station := r.Header.Get("X-Station-ID")
+	firstSeen, err := time.Parse(time.RFC3339Nano, r.Header.Get("X-Recording-Started"))
+	if station == "" || err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "zender of begintijd ontbreekt"})
+		return
+	}
+	if _, err := db.StreamURL(r.Context(), station); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "zender niet gevonden"})
+		return
+	}
+
+	wav, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxLearningRecordingBytes))
+	if err != nil {
+		if _, tooLarge := err.(*http.MaxBytesError); tooLarge {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "leerfragment is groter dan 64 MiB"})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "leerfragment kon niet worden gelezen"})
+		}
+		return
+	}
+	if !validLearningWAV(wav) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ongeldig WAV-fragment"})
+		return
+	}
+	duration := time.Duration(len(wav)-44) * time.Second / 32000
+	fingerprint := fmt.Sprintf("manual:%s:%x", firstSeen.UTC().Format(time.RFC3339Nano), sha256.Sum256(wav))
+	_, err = db.SaveLearnedCandidate(r.Context(), station, fingerprint, "manual", wav, firstSeen, firstSeen.Add(duration), 0, "", "", "", "", 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "leerfragment kon niet worden opgeslagen"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func validLearningWAV(wav []byte) bool {
+	if len(wav) < 46 || len(wav)%2 != 0 {
+		return false
+	}
+	return string(wav[:4]) == "RIFF" && binary.LittleEndian.Uint32(wav[4:8]) == uint32(len(wav)-8) &&
+		string(wav[8:16]) == "WAVEfmt " && binary.LittleEndian.Uint32(wav[16:20]) == 16 &&
+		binary.LittleEndian.Uint16(wav[20:22]) == 1 && binary.LittleEndian.Uint16(wav[22:24]) == 1 &&
+		binary.LittleEndian.Uint32(wav[24:28]) == 16000 && binary.LittleEndian.Uint32(wav[28:32]) == 32000 &&
+		binary.LittleEndian.Uint16(wav[32:34]) == 2 && binary.LittleEndian.Uint16(wav[34:36]) == 16 &&
+		string(wav[36:40]) == "data" && binary.LittleEndian.Uint32(wav[40:44]) == uint32(len(wav)-44)
+}
 
 func readLivePCM(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	if r.ContentLength > livePCMBytes {
