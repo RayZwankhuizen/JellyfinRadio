@@ -210,6 +210,7 @@ func newHandler(db *store.Store, proxyBase, apiToken string, devAutoAuth ...bool
 		case r.Method == http.MethodGet && parts[1] == "metadata":
 			metadata := proxy.Metadata(id)
 			metadata.StreamURL, _ = db.StreamURL(r.Context(), id)
+			metadata.Suppressed = proxy.SuppressionStatus(r.Context(), id)
 			writeJSON(w, http.StatusOK, metadata)
 		case r.Method == http.MethodPost && parts[1] == "metadata-recording":
 			if _, err := db.StreamURL(r.Context(), id); err != nil {

@@ -6,6 +6,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 
@@ -22,23 +23,70 @@ MODEL = Path(os.getenv("YAMNET_MODEL", ROOT / "models/yamnet.tflite"))
 LABELS = Path(os.getenv("YAMNET_LABELS", ROOT / "models/yamnet_class_map.csv"))
 classifier = Yamnet(MODEL, LABELS)
 classifier_lock = threading.Lock()
+suppression_states = {}
+marker_suppression = {}
+marker_versions = {}
+suppression_lock = threading.Lock()
+
+
+def set_suppression(station, active):
+    if not station:
+        return
+    with suppression_lock:
+        if active:
+            suppression_states[station] = True
+        else:
+            suppression_states.pop(station, None)
+
+
+def is_marker_suppressed(station):
+    with suppression_lock:
+        return marker_suppression.get(station, False)
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
-        if self.path != "/healthz":
-            self.send_error(404)
+        request = urlsplit(self.path)
+        if request.path == "/suppression":
+            station = parse_qs(request.query).get("station", [""])[0]
+            with suppression_lock:
+                active = suppression_states.get(station, False)
+            self._json(200, {"suppressed": active})
             return
-        self._json(200, {"status": "ok", "analysis_only": True})
+        if request.path == "/healthz":
+            self._json(200, {"status": "ok", "analysis_only": True})
+            return
+        self.send_error(404)
 
     def do_POST(self):
+        if self.path == "/suppression/marker":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 1 or length > 4096:
+                    raise ValueError("invalid body size")
+                payload = json.loads(self.rfile.read(length))
+                station = payload["station"]
+                active = payload["suppressed"]
+                version = int(payload["version"])
+                if not isinstance(station, str) or not station or type(active) is not bool or version < 1:
+                    raise ValueError("invalid marker state")
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                self.send_error(400, "invalid suppression marker")
+                return
+            with suppression_lock:
+                if version >= marker_versions.get(station, 0):
+                    marker_versions[station] = version
+                    marker_suppression[station] = active
+            self._json(200, {"ok": True})
+            return
         if self.path.split("?", 1)[0] == "/process":
             buffered_audio = None
             if "mode=non-music" in self.path.split("?", 1)[-1].split("&"):
                 try:
-                    buffered_audio = configure_non_music(self, classifier, classifier_lock)
+                    buffered_audio = configure_non_music(self, classifier, classifier_lock,
+                                                         set_suppression, is_marker_suppressed)
                 except ValueError:
                     self.send_error(400, "invalid non-music settings")
                     return

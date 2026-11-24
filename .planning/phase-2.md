@@ -32,4 +32,4 @@
 
 ## Current guard
 
-The production playback filter remains disabled. The manual DSP test is globally off by default and is not connected to classification. The current YAMNet baseline misses speech-over-music and does not predict news, advertisements, or presenter as separate classes.
+The production playback filter remains disabled by default. When global DSP and a station's DSP setting are enabled, Arrow ICY markers can lower playback to the configured non-music volume until an `artist - track` title arrives. This marker rule has not been live-validated against the station; general classifier accuracy remains insufficient for broad news, ad, or speech filtering.

@@ -2,7 +2,9 @@ package streamproxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -30,24 +32,38 @@ type Proxy struct {
 	dspSlots           chan struct{}
 	metadataMu         sync.RWMutex
 	metadata           map[string]StreamMetadata
+	markerMu           sync.Mutex
+	markerSuppression  map[string]bool
+	markerVersions     map[string]uint64
 	recordings         map[string]*metadataRecording
 	finishedRecordings map[string]string
 }
 
 type StreamMetadata struct {
-	Headers   http.Header `json:"headers"`
-	Status    string      `json:"status"`
-	Protocol  string      `json:"protocol"`
-	RawICY    string      `json:"raw_icy"`
-	Title     string      `json:"title"`
-	Artist    string      `json:"artist"`
-	Track     string      `json:"track"`
-	StreamURL string      `json:"stream_url"`
-	Received  bool        `json:"received"`
-	UpdatedAt time.Time   `json:"updated_at"`
-	Recording bool        `json:"recording"`
-	connection *byte
+	Headers          http.Header   `json:"headers"`
+	Status           string        `json:"status"`
+	Protocol         string        `json:"protocol"`
+	RawICY           string        `json:"raw_icy"`
+	ICYHistory       []ICYMetadata `json:"icy_history,omitempty"`
+	Title            string        `json:"title"`
+	Artist           string        `json:"artist"`
+	Track            string        `json:"track"`
+	StreamURL        string        `json:"stream_url"`
+	Received         bool          `json:"received"`
+	UpdatedAt        time.Time     `json:"updated_at"`
+	Recording        bool          `json:"recording"`
+	Suppressed       bool          `json:"suppressed"`
+	MarkerSuppressed bool          `json:"marker_suppressed"`
+	connection       *byte
 }
+
+type ICYMetadata struct {
+	Time        time.Time `json:"time"`
+	RawICY      string    `json:"raw_icy"`
+	StreamTitle string    `json:"streamtitle,omitempty"`
+}
+
+const maxICYHistory = 100
 
 func New(source StationSource, allowPrivateHosts bool) *Proxy {
 	transport := &http.Transport{
@@ -67,21 +83,110 @@ func New(source StationSource, allowPrivateHosts bool) *Proxy {
 	}
 	dspEnabled, _ := strconv.ParseBool(os.Getenv("AUDIO_DSP_ENABLED"))
 	return &Proxy{
-		source:       source,
-		client:       &http.Client{Transport: transport, CheckRedirect: validateRedirect},
-		processorURL: processorURL,
-		dspEnabled:   dspEnabled,
-		dspSlots:     make(chan struct{}, 1),
-		metadata:     make(map[string]StreamMetadata),
+		source:            source,
+		client:            &http.Client{Transport: transport, CheckRedirect: validateRedirect},
+		processorURL:      processorURL,
+		dspEnabled:        dspEnabled,
+		dspSlots:          make(chan struct{}, 1),
+		metadata:          make(map[string]StreamMetadata),
+		markerSuppression: make(map[string]bool),
+		markerVersions:    make(map[string]uint64),
 	}
 }
 
 func (p *Proxy) Metadata(id string) StreamMetadata {
 	p.metadataMu.RLock()
-	defer p.metadataMu.RUnlock()
 	metadata := p.metadata[id]
+	metadata.ICYHistory = append([]ICYMetadata(nil), metadata.ICYHistory...)
 	metadata.Recording = p.recordings[id] != nil
+	p.metadataMu.RUnlock()
+	p.markerMu.Lock()
+	metadata.MarkerSuppressed = p.markerSuppression[id]
+	p.markerMu.Unlock()
 	return metadata
+}
+
+func (p *Proxy) SuppressionStatus(ctx context.Context, id string) bool {
+	target, err := url.Parse(strings.TrimRight(p.processorURL, "/") + "/suppression")
+	if err != nil {
+		return false
+	}
+	query := target.Query()
+	query.Set("station", id)
+	target.RawQuery = query.Encode()
+	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return false
+	}
+	response, err := (&http.Client{Timeout: 750 * time.Millisecond}).Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	var state struct {
+		Suppressed bool `json:"suppressed"`
+	}
+	return response.StatusCode == http.StatusOK && json.NewDecoder(response.Body).Decode(&state) == nil && state.Suppressed
+}
+
+func (p *Proxy) updateTitleSuppression(id, title string) {
+	p.markerMu.Lock()
+	active := p.markerSuppression[id]
+	switch {
+	case isArrowSuppressionMarker(title):
+		active = true
+	case isTrackTitle(title):
+		active = false
+	}
+	changed := active != p.markerSuppression[id]
+	p.markerMu.Unlock()
+	if changed {
+		p.setMarkerSuppression(id, active, false)
+	}
+}
+
+func (p *Proxy) setMarkerSuppression(id string, active bool, force bool) {
+	p.markerMu.Lock()
+	if !force && p.markerSuppression[id] == active {
+		p.markerMu.Unlock()
+		return
+	}
+	p.markerSuppression[id] = active
+	p.markerVersions[id]++
+	version := p.markerVersions[id]
+	p.markerMu.Unlock()
+
+	body, _ := json.Marshal(struct {
+		Station    string `json:"station"`
+		Suppressed bool   `json:"suppressed"`
+		Version    uint64 `json:"version"`
+	}{id, active, version})
+	request, err := http.NewRequest(http.MethodPost, p.processorURL+"/suppression/marker", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	go func() {
+		response, err := (&http.Client{Timeout: 750 * time.Millisecond}).Do(request)
+		if err == nil {
+			response.Body.Close()
+		}
+	}()
+}
+
+func isArrowSuppressionMarker(title string) bool {
+	value := strings.ToUpper(strings.TrimLeft(strings.TrimSpace(title), " -\t"))
+	return strings.HasPrefix(value, "ARROW - CLASSIC ROCK") || strings.HasPrefix(value, "HET ARROW CLASSIC ROCK NIEUWS")
+}
+
+func isTrackTitle(title string) bool {
+	if isArrowSuppressionMarker(title) {
+		return false
+	}
+	parts := strings.SplitN(title, " - ", 2)
+	return len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != ""
 }
 
 func (p *Proxy) OpenLearningStream(ctx context.Context, id string, onMetadata func(string)) (io.ReadCloser, error) {
@@ -115,6 +220,7 @@ func (p *Proxy) clearMetadata(id string) {
 	p.metadataMu.Lock()
 	p.metadata[id] = StreamMetadata{UpdatedAt: time.Now().UTC()}
 	p.metadataMu.Unlock()
+	p.setMarkerSuppression(id, false, true)
 }
 
 func (p *Proxy) preparePlayback(id string, response *http.Response) {
@@ -127,8 +233,9 @@ func (p *Proxy) preparePlayback(id string, response *http.Response) {
 	}
 	connection := new(byte)
 	p.metadataMu.Lock()
+	history := p.metadata[id].ICYHistory
 	p.metadata[id] = StreamMetadata{
-		Headers: headers, Status: response.Status, Protocol: response.Proto, UpdatedAt: time.Now().UTC(), connection: connection,
+		Headers: headers, Status: response.Status, Protocol: response.Proto, UpdatedAt: time.Now().UTC(), ICYHistory: history, connection: connection,
 	}
 	p.recordMetadata(id, metadataEvent{Type: "headers", Status: response.Status, Protocol: response.Proto, Headers: headers})
 	p.metadataMu.Unlock()
@@ -144,9 +251,19 @@ func (p *Proxy) preparePlayback(id string, response *http.Response) {
 		if len(packet) == 0 {
 			return
 		}
+		title, hasTitle := parseICYStreamTitle(packet)
+		if hasTitle {
+			p.updateTitleSuppression(id, title)
+		}
+		if raw != "" && (len(metadata.ICYHistory) == 0 || metadata.ICYHistory[len(metadata.ICYHistory)-1].RawICY != raw) {
+			metadata.ICYHistory = append(metadata.ICYHistory, ICYMetadata{Time: time.Now().UTC(), RawICY: raw, StreamTitle: title})
+			if len(metadata.ICYHistory) > maxICYHistory {
+				metadata.ICYHistory = metadata.ICYHistory[len(metadata.ICYHistory)-maxICYHistory:]
+			}
+		}
 		metadata.RawICY = raw
 		metadata.UpdatedAt = time.Now().UTC()
-		if title, ok := parseICYStreamTitle(packet); ok {
+		if hasTitle {
 			metadata.Title, metadata.Artist, metadata.Track, metadata.Received = title, "", title, true
 			if split := strings.Index(title, " - "); split > 0 {
 				metadata.Artist = strings.TrimSpace(title[:split])
@@ -194,12 +311,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				fingerprints, err := source.ApprovedStreamFingerprints(r.Context(), id)
 				global, globalErr := source.GlobalAudioSettings(r.Context())
 				if err == nil && globalErr == nil && global.NonMusicVolume < 1 {
-					headers := http.Header{"X-Smart-Radio-Fingerprint": fingerprints}
+					headers := http.Header{"X-Smart-Radio-Fingerprint": fingerprints, "X-Smart-Radio-Station": {id}}
 					query := url.Values{
-						"mode": {"non-music"},
+						"mode":      {"non-music"},
 						"threshold": {strconv.FormatFloat(settings.ConfidenceThreshold, 'f', 4, 64)},
 						"fade_down": {strconv.FormatFloat(settings.FadeOutSeconds, 'f', 4, 64)},
-						"fade_up": {strconv.FormatFloat(settings.FadeInSeconds, 'f', 4, 64)},
+						"fade_up":   {strconv.FormatFloat(settings.FadeInSeconds, 'f', 4, 64)},
 					}
 					if p.tryProcessed(w, r, streamURL, global.NonMusicVolume, prepare, query, headers) {
 						return
@@ -414,11 +531,11 @@ func isPlaylist(contentType string) bool {
 }
 
 type reconnectingBody struct {
-	proxy      *Proxy
-	ctx        context.Context
-	target     string
-	body       io.ReadCloser
-	prepare    func(*http.Response)
+	proxy   *Proxy
+	ctx     context.Context
+	target  string
+	body    io.ReadCloser
+	prepare func(*http.Response)
 }
 
 func (b *reconnectingBody) Read(buffer []byte) (int, error) {

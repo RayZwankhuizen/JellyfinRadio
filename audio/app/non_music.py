@@ -14,7 +14,7 @@ PCM_RATE = 48000
 FRAMES_PER_SECOND = FRAME_COUNT // SEGMENT_SECONDS
 
 
-def configure(handler, classifier, classifier_lock):
+def configure(handler, classifier, classifier_lock, set_suppression, is_marker_suppressed):
     params = parse_qs(urlsplit(handler.path).query)
     threshold = float(params.get("threshold", ["0.8"])[0])
     fade_down = float(params.get("fade_down", ["1.5"])[0])
@@ -33,7 +33,9 @@ def configure(handler, classifier, classifier_lock):
             references.append(vector.reshape(FRAME_COUNT, BAND_COUNT))
     return partial(buffered_audio, classifier=classifier, classifier_lock=classifier_lock,
                    references=np.asarray(references), threshold=threshold,
-                   fade_down=fade_down, fade_up=fade_up)
+                   fade_down=fade_down, fade_up=fade_up,
+                   station=handler.headers.get("X-Smart-Radio-Station", ""),
+                   set_suppression=set_suppression, is_marker_suppressed=is_marker_suppressed)
 
 
 def matched_frames(mono, references):
@@ -53,10 +55,26 @@ def matched_frames(mono, references):
     return matches
 
 
-def buffered_audio(source, gain, *, classifier, classifier_lock, references, threshold, fade_down, fade_up):
+def buffered_audio(source, gain, *, classifier, classifier_lock, references, threshold, fade_down, fade_up,
+                   station="", set_suppression=None, is_marker_suppressed=None):
+    if set_suppression:
+        set_suppression(station, False)
+    try:
+        yield from _process_audio(source, gain, classifier=classifier, classifier_lock=classifier_lock,
+                                  references=references, threshold=threshold, fade_down=fade_down,
+                                  fade_up=fade_up, station=station, set_suppression=set_suppression,
+                                  is_marker_suppressed=is_marker_suppressed)
+    finally:
+        if set_suppression:
+            set_suppression(station, False)
+
+
+def _process_audio(source, gain, *, classifier, classifier_lock, references, threshold, fade_down, fade_up,
+                   station, set_suppression, is_marker_suppressed):
     current = 1.0
     previous_target = 1.0
     step = 0.0
+    suppressed = False
     second_bytes = PCM_RATE * 4
     block_size = second_bytes * SEGMENT_SECONDS
     block = source.read(block_size)
@@ -78,6 +96,8 @@ def buffered_audio(source, gain, *, classifier, classifier_lock, references, thr
                     target = gain
             except (ValueError, RuntimeError):
                 pass
+        if gain < 1 and is_marker_suppressed and is_marker_suppressed(station):
+            target = gain
 
         if target != previous_target:
             fade = fade_down if target < current else fade_up
@@ -92,6 +112,10 @@ def buffered_audio(source, gain, *, classifier, classifier_lock, references, thr
             segment = (segment * envelope[:, None]).astype("<i2")
         elif current != 1:
             segment = (segment * current).astype("<i2")
+        next_suppressed = target < 1 or current < 1
+        if set_suppression and next_suppressed != suppressed:
+            set_suppression(station, next_suppressed)
+            suppressed = next_suppressed
         yield segment.tobytes()
 
         learned[:-FRAMES_PER_SECOND] = learned[FRAMES_PER_SECOND:]
