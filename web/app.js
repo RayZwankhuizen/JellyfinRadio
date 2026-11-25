@@ -81,6 +81,7 @@ streamDetails.addEventListener('change', event => {
     if (value) localStorage.setItem(key, value);
     else localStorage.removeItem(key);
   } catch {}
+  refreshSilero();
   streamDetails.querySelectorAll('.stream-title-category-select').forEach(picker => {
     if (picker.dataset.titleKey === key) picker.value = value;
   });
@@ -547,6 +548,7 @@ function renderPlayerStation(station) {
 }
 
 async function playStation(button) {
+  stopSilero();
   stopLiveAnalysis();
   radioPlayer.hidden = false;
   document.querySelector('#radio-metadata-rows').scrollTop = 0;
@@ -581,7 +583,8 @@ async function playStation(button) {
   setRadioStatus('Verbinding maken met de stream…');
   document.querySelector('#radio-signal-status').textContent = 'Wachten op audiodata';
   clearTimeout(streamStartTimer);
-  radioAudio.src = `/stream/${encodeURIComponent(button.dataset.play)}`;
+  radioAudio.src = radioStreamURL();
+  refreshSilero();
   clearMeters();
   startSpectrum();
   streamStartTimer=setTimeout(()=>{if(radioAudio.readyState<1)setRadioStatus('Na 10 seconden nog geen afspeelbare audio ontvangen. De stream kan offline zijn of een browser-incompatibel formaat gebruiken.');},10000);
@@ -597,6 +600,10 @@ function renderStreamHeaders(rows) {
   renderedHeaders = markup;
 }
 
+function titleFromICY(raw) {
+  return raw?.match(/(?:^|;)\s*StreamTitle\s*=\s*(['"])(.*?)\1(?=\s*(?:;|$))/i)?.[2]?.trim();
+}
+
 function renderStreamMetadata(metadata) {
   currentStreamMetadata = metadata;
   const headers = metadata.headers || {};
@@ -609,7 +616,6 @@ function renderStreamMetadata(metadata) {
   const genre = header('icy-genre').trim();
   const sameName = name && description && name.toLocaleLowerCase() === description.toLocaleLowerCase();
   const rawICY = metadata.raw_icy || '';
-  const titleFromICY = raw => raw?.match(/(?:^|;)\s*StreamTitle\s*=\s*(['"])(.*?)\1(?=\s*(?:;|$))/i)?.[2]?.trim();
   const streamTitle = titleFromICY(rawICY) || metadata.title || '';
   const history = Array.isArray(metadata.icy_history) ? metadata.icy_history : [];
   const icyRows = history.length ? [...history].reverse().map(item => {
@@ -681,6 +687,7 @@ function startMetadataPolling(uuid) {
       const url=document.querySelector('#radio-stream-url');url.textContent=metadata.stream_url||'Geen stream-URL beschikbaar';url.title=metadata.stream_url||'';
       document.querySelector('#radio-copy-url').disabled=!metadata.stream_url;
       renderStreamMetadata(metadata);
+      refreshSilero();
     } catch {
       if (uuid !== currentStationId) return;
       document.querySelector('#radio-track-artist').textContent='';
@@ -689,6 +696,7 @@ function startMetadataPolling(uuid) {
       document.querySelector('#radio-suppression-status').textContent = '';
       renderedMetadata = '';
       currentStreamMetadata = undefined;
+      refreshSilero();
       renderStreamHeaders([]);
       streamDetails.innerHTML = metadataRow('Metadata', 'Niet beschikbaar');
       metadataCopy.disabled = !duckingHistory.firstElementChild;
@@ -711,11 +719,171 @@ function showMetadataRecording(active, uuid=currentStationId) {
     if(status)status.textContent=recording?'Opname loopt':'';
   });
 }
+const sileroToggle = document.querySelector('#radio-silero-toggle');
+const sileroStatus = document.querySelector('#radio-silero-status');
+const sileroAd = document.querySelector('#radio-silero-ad');
+const sileroBlock = document.querySelector('#radio-silero-block');
+const sileroStations = new Set();
+let playbackGain, sileroSession, sileroReleaseTimer;
+let sileroSpeech = false, sileroTarget = 1;
+
+function sileroEnabled() {
+  return sileroStations.has(currentStationId);
+}
+
+function radioStreamURL() {
+  const path = `/stream/${encodeURIComponent(currentStationId)}`;
+  return sileroEnabled() ? path + '?playback=silero' : path;
+}
+
+function setSileroGain(target, immediate = false) {
+  if (!playbackGain || (!immediate && target === sileroTarget)) return;
+  sileroTarget = target;
+  const now = audioContext.currentTime;
+  const gain = playbackGain.gain;
+  if (immediate) {
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(target, now);
+    return;
+  }
+  if (gain.cancelAndHoldAtTime) gain.cancelAndHoldAtTime(now);
+  else {
+    const current = gain.value;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(current, now);
+  }
+  gain.linearRampToValueAtTime(target, now + (target < 1 ? 0.3 : 1));
+}
+
+function sileroHLS(metadata) {
+  const contentTypes = Object.entries(metadata?.headers || {})
+    .filter(([name]) => name.toLowerCase() === 'content-type')
+    .flatMap(([, values]) => values).join(' ');
+  return /\bhls\b|m3u8|mpegurl/i.test([currentCodec, metadata?.stream_url, contentTypes].join(' '));
+}
+
+function refreshSilero() {
+  const enabled = sileroEnabled();
+  const metadata = currentStreamMetadata;
+  const hls = sileroHLS(metadata);
+  sileroToggle.setAttribute('aria-pressed', String(enabled));
+  sileroToggle.disabled = hls && !enabled;
+  const title = titleFromICY(metadata?.raw_icy) || metadata?.title || '';
+  const block = metadata?.raw_icy || title;
+  const blockKey = block ? 'smart-radio-silero-block:' + JSON.stringify([currentStationId, block]) : '';
+  let suppressed = false, music = false;
+  if (blockKey) {
+    try {
+      suppressed = localStorage.getItem(blockKey) === '1';
+      music = Boolean(title && localStorage.getItem(streamTitleLabelKey(title)) === 'music');
+    } catch {}
+  }
+  sileroAd.hidden = !enabled || !/\b(reclame|commercial|sponsor|promo|ad[ -]break)\b/i
+    .test([metadata?.raw_icy, title, metadata?.artist, metadata?.track].join(' '));
+  sileroBlock.hidden = !enabled || hls || !blockKey;
+  sileroBlock.textContent = suppressed ? 'Demping voor dit blok wissen' : 'Demp dit metadatablok';
+  sileroBlock.dataset.key = blockKey;
+  if (!enabled || hls || radioAudio.paused || radioAudio.ended || radioAudio.error) {
+    if (sileroSession) stopSilero();
+    sileroStatus.textContent = hls ? 'Silero uit voor HLS' : enabled ? 'Wacht op afspelen' : '';
+    return;
+  }
+
+  const target = suppressed || (sileroSpeech && !music) ? 0.3 : 1;
+  setSileroGain(target);
+  if (!sileroSession) beginSilero();
+  if (sileroSession?.ready) {
+    sileroStatus.textContent = suppressed ? 'Volume verlaagd · opgeslagen blok'
+      : target < 1 ? 'Volume verlaagd · spraak'
+      : sileroSpeech && music ? 'Spraak gedetecteerd · muziek beschermd' : 'Silero luistert';
+  }
+}
+
+function stopSilero() {
+  const session = sileroSession;
+  sileroSession = undefined;
+  session?.abort();
+  session?.dispose?.().catch(console.warn);
+  clearTimeout(sileroReleaseTimer);
+  sileroSpeech = false;
+  setSileroGain(1, true);
+}
+
+async function beginSilero() {
+  if (!audioContext || !audioSource || !playbackGain) {
+    sileroStatus.textContent = 'Silero vereist Web Audio';
+    return;
+  }
+  const session = new AbortController();
+  sileroSession = session;
+  sileroStatus.textContent = 'Silero laden…';
+  try {
+    const {startSilero} = await import('/radio-silero.mjs');
+    const dispose = await startSilero({
+      context: audioContext, source: audioSource, signal: session.signal,
+      onStart: () => {
+        if (session.signal.aborted) return;
+        clearTimeout(sileroReleaseTimer);
+        sileroSpeech = true;
+        refreshSilero();
+      },
+      onEnd: () => {
+        if (session.signal.aborted) return;
+        clearTimeout(sileroReleaseTimer);
+        sileroReleaseTimer = setTimeout(() => {
+          sileroSpeech = false;
+          refreshSilero();
+        }, 3000);
+      },
+    });
+    if (session.signal.aborted) {
+      await dispose();
+      return;
+    }
+    session.dispose = dispose;
+    session.ready = true;
+    refreshSilero();
+  } catch (error) {
+    if (session.signal.aborted) return;
+    sileroStatus.textContent = 'Silero kon niet starten';
+    console.warn(error);
+  }
+}
+
+sileroBlock.addEventListener('click', () => {
+  const key = sileroBlock.dataset.key;
+  if (!key) return;
+  try {
+    if (localStorage.getItem(key) === '1') localStorage.removeItem(key);
+    else localStorage.setItem(key, '1');
+    refreshSilero();
+  } catch {
+    sileroStatus.textContent = 'Blok opslaan is niet beschikbaar';
+  }
+});
+
+sileroToggle.addEventListener('click', async () => {
+  if (!currentStationId) return;
+  const wasPlaying = !radioAudio.paused;
+  stopSilero();
+  if (sileroEnabled()) sileroStations.delete(currentStationId);
+  else sileroStations.add(currentStationId);
+  radioAudio.pause();
+  currentStreamMetadata = undefined;
+  radioAudio.src = radioStreamURL();
+  renderRadioDSP();
+  refreshSilero();
+  if (wasPlaying) {
+    try { await radioAudio.play(); }
+    catch { if (radioAudio.paused) setRadioStatus('Druk op Afspelen om opnieuw te verbinden.'); }
+  }
+});
+
 function startSpectrum() {
   const AudioContextClass=window.AudioContext||window.webkitAudioContext;
   if(!AudioContextClass){document.querySelector('#radio-signal-status').textContent='Live spectrum niet beschikbaar in deze browser';return;}
   try {
-    if(!audioContext){audioContext=new AudioContextClass();analyser=audioContext.createAnalyser();analyser.fftSize=2048;audioSource=audioContext.createMediaElementSource(radioAudio);audioSource.connect(analyser);analyser.connect(audioContext.destination);}
+    if(!audioContext){audioContext=new AudioContextClass();analyser=audioContext.createAnalyser();analyser.fftSize=2048;audioSource=audioContext.createMediaElementSource(radioAudio);audioSource.connect(analyser);playbackGain=audioContext.createGain();analyser.connect(playbackGain);playbackGain.connect(audioContext.destination);}
     audioContext.resume().catch(()=>{});cancelAnimationFrame(spectrumFrame);drawSpectrum();
   } catch { document.querySelector('#radio-signal-status').textContent='Live spectrum niet beschikbaar'; }
 }
@@ -728,7 +896,8 @@ function renderRadioDSP() {
   const button=document.querySelector('#radio-dsp-toggle'),status=document.querySelector('#radio-dsp-status');
   if(!audioProfile){button.disabled=true;button.textContent='DSP laden…';return;}
   const enabled=audioProfile.dsp_enabled;
-  button.disabled=false;button.textContent=enabled?'DSP uitzetten':'DSP aanzetten';button.setAttribute('aria-pressed',String(enabled));
+  button.disabled=sileroEnabled();button.textContent=enabled?'DSP uitzetten':'DSP aanzetten';button.setAttribute('aria-pressed',String(enabled));
+  if (sileroEnabled()) { status.textContent = 'Proxy-DSP gepasseerd tijdens Silero-proef'; return; }
   status.textContent=`Zenderinstelling: ${enabled?'aan':'uit'}${dspAvailable?'':' · globale DSP uit, instelling is nog niet actief'}`;
 }
 document.querySelector('#radio-dsp-toggle').addEventListener('click',async event=>{
@@ -741,7 +910,7 @@ document.querySelector('#radio-dsp-toggle').addEventListener('click',async event
     if(station!==currentStationId)return;
     audioProfile=saved;
     renderRadioDSP();
-    if(radioAudio.currentSrc){setRadioStatus('DSP-instelling opgeslagen; opnieuw verbinden…');radioAudio.pause();radioAudio.src=`/stream/${encodeURIComponent(station)}`;radioAudio.load();if(wasPlaying)try{await radioAudio.play();}catch{setRadioStatus('DSP-instelling opgeslagen. Druk op Afspelen om opnieuw te verbinden.');}}
+    if(radioAudio.currentSrc){setRadioStatus('DSP-instelling opgeslagen; opnieuw verbinden…');radioAudio.pause();radioAudio.src=radioStreamURL();radioAudio.load();if(wasPlaying)try{await radioAudio.play();}catch{setRadioStatus('DSP-instelling opgeslagen. Druk op Afspelen om opnieuw te verbinden.');}}
   } catch(error) { if(station===currentStationId){audioProfile={...next,dsp_enabled:!next.dsp_enabled};saveError=error.message;} }
   finally { renderRadioDSP();if(saveError)document.querySelector('#radio-dsp-status').textContent=`Opslaan mislukt: ${saveError}`; }
 });
@@ -963,14 +1132,16 @@ function updateMixer(bins) {
     spectrogram.fillRect(i*step+1,height-barHeight,Math.max(1,step-2),barHeight);
   }
 }
-radioAudio.addEventListener('playing', () => { clearTimeout(streamStartTimer);setRadioStatus('');startSpectrum();startLiveAnalysis(); });
+radioAudio.addEventListener('playing', () => { clearTimeout(streamStartTimer);setRadioStatus('');startSpectrum();startLiveAnalysis();refreshSilero(); });
 radioAudio.addEventListener('waiting', () => setRadioStatus('Bufferen: de browser wacht op audiogegevens…'));
 radioAudio.addEventListener('stalled', () => setRadioStatus('Geen nieuwe audiogegevens ontvangen; de stream kan stilvallen.'));
 radioAudio.addEventListener('canplay', () => { clearTimeout(streamStartTimer);setRadioStatus('Browser heeft afspeelbare audiogegevens ontvangen.'); });
-radioAudio.addEventListener('pause', () => { if(!radioAudio.ended&&!radioAudio.error&&radioAudio.currentSrc)setRadioStatus('Afspelen gepauzeerd.');cancelAnimationFrame(spectrumFrame);if(radioAudio.paused)stopLiveAnalysis(); });
-radioAudio.addEventListener('ended', stopLiveAnalysis);
+radioAudio.addEventListener('pause', () => { if(!radioAudio.ended&&!radioAudio.error&&radioAudio.currentSrc)setRadioStatus('Afspelen gepauzeerd.');cancelAnimationFrame(spectrumFrame);if(radioAudio.paused){stopLiveAnalysis();stopSilero();refreshSilero();} });
+radioAudio.addEventListener('ended', () => { stopLiveAnalysis(); stopSilero(); refreshSilero(); });
 radioAudio.addEventListener('error', () => {
   stopLiveAnalysis();
+  stopSilero();
+  if (sileroEnabled()) sileroStatus.textContent = 'Stream niet beschikbaar';
   cancelAnimationFrame(spectrumFrame);
   const code=radioAudio.error?.code;
   const detail=code===4?`Browser ondersteunt het ontvangen formaat niet (${currentCodec||'codec onbekend'}).`:code===3?`Browser kan de audiogegevens niet decoderen (${currentCodec||'codec onbekend'}).`:code===2?'Netwerkfout tijdens het ophalen van de stream.':code===1?'Stream is afgebroken.':'Stream kon niet worden gestart.';

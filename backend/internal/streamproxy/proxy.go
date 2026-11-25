@@ -300,7 +300,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	p.clearMetadata(id)
 	prepare := func(response *http.Response) { p.preparePlayback(id, response) }
-	if p.dspEnabled {
+	if p.dspEnabled && r.URL.Query().Get("playback") != "silero" {
 		if source, ok := p.source.(interface {
 			AudioSettings(context.Context, string) (store.AudioSettings, error)
 			GlobalAudioSettings(context.Context) (store.GlobalAudioSettings, error)

@@ -57,6 +57,12 @@
               <a class="button quiet" href="#learning-recordings" data-page="learning-recordings">Leerfragmenten</a>
             </div>
             <div class="radio-dsp"><button class="button quiet" id="radio-dsp-toggle" type="button" disabled>DSP laden…</button><span id="radio-dsp-status" role="status">Selecteer een zender</span><span id="radio-suppression-status" role="status" aria-live="polite"></span></div>
+            <div class="radio-dsp">
+              <button class="button quiet" id="radio-silero-toggle" type="button" aria-pressed="false">Silero-proef</button>
+              <span id="radio-silero-status" role="status"></span>
+              <span id="radio-silero-ad" hidden>Mogelijke reclame</span>
+              <button class="button quiet" id="radio-silero-block" type="button" hidden>Demp dit metadatablok</button>
+            </div>
           </div>
           <div class="radio-live-panel" aria-label="Live audioanalyse">
             <div class="radio-analysis-chart"><div class="radio-section-label"><span>FREQUENTIES · LAAG → HOOG</span><span id="radio-player-format">Formaat onbekend</span></div><canvas id="radio-spectrogram" width="360" height="64" role="img" aria-label="Live spectrum: verticale frequentiemeters bewegen op en neer"></canvas><span id="radio-signal-status" aria-live="polite">Wachten op audiodata</span></div>

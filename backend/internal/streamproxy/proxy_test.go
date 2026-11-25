@@ -256,15 +256,26 @@ func TestProcessedStreamFallsBackBeforeOutputStarts(t *testing.T) {
 }
 
 func TestGlobalDSPOffKeepsEnabledStationOnPassthrough(t *testing.T) {
-	t.Setenv("AUDIO_DSP_ENABLED", "false")
+	assertPlaybackPassthrough(t, "false", "/stream/test")
+}
+
+func TestSileroPlaybackBypassesEnabledProxyDSP(t *testing.T) {
+	assertPlaybackPassthrough(t, "true", "/stream/test?playback=silero")
+}
+
+func assertPlaybackPassthrough(t *testing.T, dspEnabled, path string) {
+	t.Helper()
+	t.Setenv("AUDIO_DSP_ENABLED", dspEnabled)
 	var processorCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
 		_, _ = io.WriteString(w, "original-radio-audio")
 	}))
 	defer upstream.Close()
-	processor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		processorCalls.Add(1)
+	processor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/process" {
+			processorCalls.Add(1)
+		}
 		_, _ = io.WriteString(w, "unexpected-dsp")
 	}))
 	defer processor.Close()
@@ -272,7 +283,7 @@ func TestGlobalDSPOffKeepsEnabledStationOnPassthrough(t *testing.T) {
 
 	server := httptest.NewServer(New(dspSource{url: upstream.URL}, true))
 	defer server.Close()
-	response, err := http.Get(server.URL + "/stream/test")
+	response, err := http.Get(server.URL + path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +293,7 @@ func TestGlobalDSPOffKeepsEnabledStationOnPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(buffer) != "original-radio-audio" || response.Header.Get("X-Smart-Radio-DSP") != "" || processorCalls.Load() != 0 {
-		t.Fatalf("DSP default was not passthrough: data=%q headers=%v calls=%d", buffer, response.Header, processorCalls.Load())
+		t.Fatalf("expected passthrough: data=%q headers=%v calls=%d", buffer, response.Header, processorCalls.Load())
 	}
 }
 
